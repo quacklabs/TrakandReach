@@ -101,13 +101,6 @@ class PlaywrightService:
         logger.info("⏳ Initializing automation engine...")
         try:
             self.pw = await async_playwright().start()
-            # Ensure webkit is installed
-            process = await asyncio.create_subprocess_exec(
-                "playwright", "install", "webkit",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            await process.wait()
             self.load_sessions()
             self.is_running = True
             logger.info("Automation engine loaded! ✅")
@@ -257,6 +250,16 @@ class PlaywrightService:
 
         try:
             await session.page.goto(url, wait_until='domcontentloaded', timeout=30000)
+
+            # Special handling for WhatsApp Web QR code
+            if "web.whatsapp.com" in url:
+                logger.info("WhatsApp Web detected. Waiting for QR code...")
+                try:
+                    await session.page.wait_for_selector("canvas", timeout=10000)
+                    logger.info("QR Code canvas detected! ✅")
+                except:
+                    logger.warning("QR Code canvas not found within timeout. Starting stream anyway.")
+
             self.start_stream(session)
         except Exception as e:
             logger.error(f"Failed to load page: {e}")

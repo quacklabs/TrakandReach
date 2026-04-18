@@ -59,6 +59,30 @@ class TrakandReach:
                 "ws_url": f"ws://{request.host.split(':')[0]}:{self.ws_port}"
             })
 
+        @app.route('/reach/whatsapp', methods=['POST'])
+        def start_whatsapp():
+            data = request.json or {}
+            # Standard WhatsApp Device Info
+            device_info = {
+                "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+                "width": 1280,
+                "height": 720,
+                "pixelRatio": 1.0,
+                "fingerprint": data.get('session_id', 'whatsapp-session')
+            }
+
+            future = asyncio.run_coroutine_threadsafe(
+                self.setup_whatsapp(device_info),
+                self.loop
+            )
+            session_id = future.result()
+
+            return jsonify({
+                "session_id": session_id,
+                "ws_url": f"ws://{request.host.split(':')[0]}:{self.ws_port}",
+                "message": "WhatsApp session initiated. Connect to WebSocket to scan QR code."
+            })
+
         # Start the background engine
         self.start_background_engine()
 
@@ -82,6 +106,12 @@ class TrakandReach:
         logger.info(f"Trakand Reach WebSocket server started on port {self.ws_port} ✅")
 
         self.loop.run_forever()
+
+    async def setup_whatsapp(self, device_info):
+        session = await self.engine.create_session("whatsapp-key", device_info)
+        # We don't block on start_up_link here to return to Flask quickly
+        asyncio.create_task(self.engine.start_up_link(session.id, "https://web.whatsapp.com"))
+        return session.id
 
     def is_alive(self):
         return self.engine.is_running
