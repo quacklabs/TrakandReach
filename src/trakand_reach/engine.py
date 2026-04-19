@@ -4,7 +4,6 @@ import logging
 import os
 import time
 import base64
-import io
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Dict, Optional, Any, List
@@ -16,6 +15,17 @@ import websockets
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("trakand_reach")
+
+
+def _websocket_still_open(ws: Any) -> bool:
+    """True if the connection can still receive frames (works across websockets 10/12+)."""
+    if ws is None:
+        return False
+    if getattr(ws, "closed", False) is True:
+        return False
+    if getattr(ws, "close_code", None) is not None:
+        return False
+    return True
 
 class CriticalError(Enum):
     BROWSER_CRASH = 'BROWSER_CRASH'
@@ -54,7 +64,7 @@ class Session:
     browser_type: str
     access_key: str
     last_url: Optional[str] = None
-    ws: Optional[websockets.WebSocketServerProtocol] = None
+    ws: Optional[Any] = None
     browser: Optional[Browser] = None
     context: Optional[BrowserContext] = None
     page: Optional[Page] = None
@@ -69,12 +79,45 @@ class Session:
     })
 
     def emit(self, event: str, *args, **kwargs):
-        if event in self.event_listeners:
-            for listener in self.event_listeners[event]:
+        if event not in self.event_listeners:
+            return
+        bound_loop = getattr(self, "_event_loop", None)
+        for listener in list(self.event_listeners[event]):
+            try:
                 if asyncio.iscoroutinefunction(listener):
-                    asyncio.create_task(listener(*args, **kwargs))
+                    coro = listener(*args, **kwargs)
+
+                    def _make_schedule(c: Any) -> Any:
+                        def _schedule() -> None:
+                            try:
+                                asyncio.create_task(c)
+                            except RuntimeError:
+                                if bound_loop and not bound_loop.is_closed():
+                                    asyncio.ensure_future(c, loop=bound_loop)
+
+                        return _schedule
+
+                    schedule = _make_schedule(coro)
+                    try:
+                        running = asyncio.get_running_loop()
+                    except RuntimeError:
+                        running = None
+
+                    if bound_loop and not bound_loop.is_closed():
+                        if running is bound_loop:
+                            schedule()
+                        else:
+                            bound_loop.call_soon_threadsafe(schedule)
+                    elif running and not running.is_closed():
+                        running.call_soon_threadsafe(schedule)
+                    else:
+                        logger.warning(
+                            "Skipping async listener for %s: no usable event loop", event
+                        )
                 else:
                     listener(*args, **kwargs)
+            except Exception:
+                logger.exception("Error in event listener for %s", event)
 
     def to_dict(self):
         d = {
@@ -107,21 +150,30 @@ class PlaywrightService:
         os.makedirs(self.sessions_base_dir, exist_ok=True)
         self.pw = None
         self.is_running = False
+        self._lifecycle_lock = asyncio.Lock()
 
     async def start(self, auto_resume: bool = True):
-        if self.is_running:
-            return
-        logger.info("⏳ Initializing automation engine...")
-        try:
-            self.pw = await async_playwright().start()
-            self.load_sessions()
-            self.is_running = True
-            logger.info("Automation engine loaded! ✅")
-            if auto_resume:
-                asyncio.create_task(self.resume_all_sessions())
-        except Exception as e:
-            logger.error(f"Failed to initialize engine ❌: {e}")
-            raise
+        async with self._lifecycle_lock:
+            if self.is_running:
+                return
+            logger.info("⏳ Initializing automation engine...")
+            try:
+                self.pw = await async_playwright().start()
+                self.load_sessions()
+                self.is_running = True
+                logger.info("Automation engine loaded! ✅")
+                if auto_resume:
+                    asyncio.create_task(self.resume_all_sessions())
+            except Exception as e:
+                logger.error(f"Failed to initialize engine ❌: {e}")
+                self.is_running = False
+                if self.pw:
+                    try:
+                        await self.pw.stop()
+                    except Exception:
+                        pass
+                    self.pw = None
+                raise
 
     def load_sessions(self):
         if not os.path.exists(self.metadata_path):
@@ -167,12 +219,17 @@ class PlaywrightService:
                     logger.error(f"Failed to resume session {session_id}: {e}")
 
     async def stop(self):
-        self.save_sessions()
-        self.is_running = False
-        for session_id in list(self.sessions.keys()):
-            await self.destroy_session(session_id, remove_metadata=False)
-        if self.pw:
-            await self.pw.stop()
+        async with self._lifecycle_lock:
+            self.save_sessions()
+            self.is_running = False
+            for session_id in list(self.sessions.keys()):
+                await self.destroy_session(session_id, remove_metadata=False)
+            if self.pw:
+                try:
+                    await self.pw.stop()
+                except Exception as e:
+                    logger.warning("Playwright stop raised: %s", e)
+                self.pw = None
 
     def parse_browser(self, input_str: str) -> str:
         input_str = input_str.lower()
@@ -200,7 +257,12 @@ class PlaywrightService:
 
         session_id = info.fingerprint
         if session_id in self.sessions:
-            return self.sessions[session_id]
+            existing = self.sessions[session_id]
+            try:
+                existing._event_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            return existing
 
         session = Session(
             id=session_id,
@@ -209,6 +271,10 @@ class PlaywrightService:
             browser_type=self.parse_browser(browser_type),
             access_key=access_key
         )
+        try:
+            session._event_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
         self.sessions[session_id] = session
         self.save_sessions()
         return session
@@ -217,6 +283,11 @@ class PlaywrightService:
         session = self.sessions.get(session_id)
         if not session:
             raise ValueError(f"Session {session_id} not found")
+
+        try:
+            session._event_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
 
         if session.browser and session.browser.is_connected():
             return
@@ -313,7 +384,13 @@ class PlaywrightService:
                     window.addEventListener('load', window.trakand_reach_hook);
                 """)
 
-                await session.page.expose_function("trakand_emit", lambda event, data: session.emit(event, data))
+                def trakand_emit_bridge(event: str, data: Any) -> None:
+                    try:
+                        session.emit(event, data)
+                    except Exception:
+                        logger.exception("trakand_emit handler failed")
+
+                await session.page.expose_function("trakand_emit", trakand_emit_bridge)
 
             await session.page.goto(url, wait_until='domcontentloaded', timeout=30000)
 
@@ -348,7 +425,7 @@ class PlaywrightService:
         async def stream_loop():
             logger.info(f"⏳ Starting screenshot stream for session {session.id}...")
             try:
-                while session.is_alive and session.ws and not session.ws.closed:
+                while session.is_alive and _websocket_still_open(session.ws):
                     await self.send_screenshot(session)
                     await asyncio.sleep(0.8)
             except Exception as e:
@@ -370,7 +447,7 @@ class PlaywrightService:
                 'data': base64_screenshot
             })
 
-            if session.ws and not session.ws.closed:
+            if _websocket_still_open(session.ws):
                 await session.ws.send(message)
         except Exception as e:
             logger.error(f"Error taking/sending screenshot: {e}")
@@ -380,7 +457,15 @@ class PlaywrightService:
         if session:
             session.is_alive = False
             if session.screenshot_task:
-                session.screenshot_task.cancel()
+                t = session.screenshot_task
+                session.screenshot_task = None
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    logger.debug("screenshot task join: %s", e)
             try:
                 if session.page: await session.page.close()
                 if session.context: await session.context.close()
@@ -392,7 +477,7 @@ class PlaywrightService:
                 self.sessions.pop(session_id, None)
                 self.save_sessions()
 
-    async def handle_websocket(self, ws: websockets.WebSocketServerProtocol, path: str = ""):
+    async def handle_websocket(self, ws: Any, path: str = ""):
         connection_id = base64.b64encode(os.urandom(9)).decode('utf-8')
         logger.info(f"New connection established (id: {connection_id})")
 
