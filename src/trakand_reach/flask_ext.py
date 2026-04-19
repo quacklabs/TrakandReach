@@ -3,7 +3,7 @@ import threading
 import logging
 from flask import Flask, jsonify, request
 from .engine import PlaywrightService
-import websockets
+from websockets.asyncio.server import serve as ws_serve
 
 logger = logging.getLogger("trakand_reach.flask")
 
@@ -127,18 +127,19 @@ class TrakandReach:
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
 
-        self.loop.run_until_complete(self.engine.start())
+        async def _run() -> None:
+            await self.engine.start()
+            # websockets ≥12: serve() must run inside the loop (async with), not as a bare coroutine
+            # passed to run_until_complete without a running loop during Server setup.
+            async with ws_serve(
+                self.engine.handle_websocket,
+                "0.0.0.0",
+                self.ws_port,
+            ):
+                logger.info("Trakand Reach WebSocket server started on port %s ✅", self.ws_port)
+                await asyncio.Future()  # keep loop alive until process exit
 
-        start_server = websockets.serve(
-            self.engine.handle_websocket,
-            "0.0.0.0",
-            self.ws_port
-        )
-
-        self.loop.run_until_complete(start_server)
-        logger.info(f"Trakand Reach WebSocket server started on port {self.ws_port} ✅")
-
-        self.loop.run_forever()
+        self.loop.run_until_complete(_run())
 
     async def setup_whatsapp(self, device_info):
         session = await self.engine.create_session("whatsapp-key", device_info)
