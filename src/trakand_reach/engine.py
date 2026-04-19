@@ -71,6 +71,13 @@ class Session:
     is_alive: bool = True
     recovery_attempts: int = 0
     screenshot_task: Optional[asyncio.Task] = None
+    state_task: Optional[asyncio.Task] = None
+    connection_state: str = 'created'
+    last_qr: Optional[str] = None
+    last_qr_at: Optional[float] = None
+    owner_jid: Optional[str] = None
+    profile_name: Optional[str] = None
+    profile_picture_url: Optional[str] = None
     event_listeners: Dict[str, List[Any]] = field(default_factory=lambda: {
         'qr': [],
         'connection_update': [],
@@ -126,7 +133,11 @@ class Session:
             "device_info": asdict(self.device_info),
             "browser_type": self.browser_type,
             "access_key": self.access_key,
-            "last_url": self.last_url
+            "last_url": self.last_url,
+            "connection_state": self.connection_state,
+            "owner_jid": self.owner_jid,
+            "profile_name": self.profile_name,
+            "profile_picture_url": self.profile_picture_url,
         }
         return d
 
@@ -201,6 +212,10 @@ class PlaywrightService:
                         browser_type=sdata['browser_type'],
                         access_key=sdata['access_key'],
                         last_url=sdata.get('last_url'),
+                        connection_state=sdata.get('connection_state', 'created'),
+                        owner_jid=sdata.get('owner_jid'),
+                        profile_name=sdata.get('profile_name'),
+                        profile_picture_url=sdata.get('profile_picture_url'),
                         is_alive=False # Mark as not yet re-spun
                     )
                     self.sessions[sid] = session
@@ -290,6 +305,139 @@ class PlaywrightService:
             "last_start_error": self.last_start_error,
         }
 
+    def _set_session_runtime_state(
+        self,
+        session: Session,
+        *,
+        state: Optional[str] = None,
+        qr: Optional[str] = None,
+        owner_jid: Optional[str] = None,
+        profile_name: Optional[str] = None,
+        profile_picture_url: Optional[str] = None,
+    ) -> None:
+        changed = False
+        qr_changed = False
+
+        if state and state != session.connection_state:
+            session.connection_state = state
+            changed = True
+
+        if qr is not None:
+            qr = qr.strip() or None
+        if qr and qr != session.last_qr:
+            session.last_qr = qr
+            session.last_qr_at = time.time()
+            changed = True
+            qr_changed = True
+
+        if state == 'open' and session.last_qr is not None:
+            session.last_qr = None
+            session.last_qr_at = None
+            changed = True
+
+        if owner_jid is not None and owner_jid != session.owner_jid:
+            session.owner_jid = owner_jid
+            changed = True
+        if profile_name is not None and profile_name != session.profile_name:
+            session.profile_name = profile_name
+            changed = True
+        if profile_picture_url is not None and profile_picture_url != session.profile_picture_url:
+            session.profile_picture_url = profile_picture_url
+            changed = True
+
+        if qr_changed:
+            session.emit('qr', session.last_qr)
+
+        if changed:
+            session.emit(
+                'connection_update',
+                {
+                    'state': session.connection_state,
+                    'owner_jid': session.owner_jid,
+                    'profile_name': session.profile_name,
+                    'profile_picture_url': session.profile_picture_url,
+                }
+            )
+            self.save_sessions()
+
+    async def inspect_whatsapp_state(self, session: Session) -> Dict[str, Any]:
+        if not session.page or session.page.is_closed():
+            return {"state": "close"}
+
+        return await session.page.evaluate("""() => {
+            const bodyText = (document.body?.innerText || '').toLowerCase();
+            const qrNode = document.querySelector('div[data-ref]');
+            const qr = qrNode ? qrNode.getAttribute('data-ref') : null;
+            const appShell = Boolean(
+                document.querySelector('#pane-side') ||
+                document.querySelector('[data-testid="chat-list"]') ||
+                document.querySelector('[data-testid="chat-list-search"]') ||
+                document.querySelector('div[aria-label="Chat list"]')
+            );
+            const readStorage = (key) => {
+                try {
+                    const value = window.localStorage?.getItem(key);
+                    return typeof value === 'string' && value.trim() ? value.trim() : null;
+                } catch {
+                    return null;
+                }
+            };
+            const ownerJid = readStorage('last-wid-md') ||
+                readStorage('last-wid') ||
+                readStorage('last-wid-md-lid') ||
+                readStorage('waLastOwnJid');
+            const profileName = readStorage('last-pushname') ||
+                readStorage('pushname') ||
+                readStorage('waLastPushname');
+            let state = 'connecting';
+            if (qr) {
+                state = 'connecting';
+            } else if (appShell || ownerJid) {
+                state = 'open';
+            } else if (
+                bodyText.includes('scan the qr code') ||
+                bodyText.includes('use whatsapp on your phone') ||
+                bodyText.includes('link with phone number')
+            ) {
+                state = 'connecting';
+            }
+            return {
+                state,
+                qr,
+                owner_jid: ownerJid,
+                profile_name: profileName,
+                title: document.title || null,
+            };
+        }""")
+
+    def start_whatsapp_state_monitor(self, session: Session) -> None:
+        if session.state_task and not session.state_task.done():
+            return
+
+        async def state_loop():
+            try:
+                while session.is_alive:
+                    if not session.page or session.page.is_closed():
+                        self._set_session_runtime_state(session, state='close')
+                        break
+                    try:
+                        snapshot = await self.inspect_whatsapp_state(session)
+                        self._set_session_runtime_state(
+                            session,
+                            state=snapshot.get('state') or 'connecting',
+                            qr=snapshot.get('qr'),
+                            owner_jid=snapshot.get('owner_jid'),
+                            profile_name=snapshot.get('profile_name'),
+                            profile_picture_url=snapshot.get('profile_picture_url'),
+                        )
+                    except Exception as e:
+                        logger.debug("Failed to inspect WhatsApp state for %s: %s", session.id, e)
+                    await asyncio.sleep(2.0)
+            finally:
+                session.state_task = None
+
+        session.state_task = asyncio.create_task(state_loop())
+
     def parse_browser(self, input_str: str) -> str:
         input_str = input_str.lower()
         if 'firefox' in input_str: return 'firefox'
@@ -335,6 +483,7 @@ class PlaywrightService:
         except RuntimeError:
             pass
         self.sessions[session_id] = session
+        session.connection_state = 'connecting'
         self.save_sessions()
         return session
 
@@ -457,6 +606,15 @@ class PlaywrightService:
             if "web.whatsapp.com" in url:
                 logger.info("WhatsApp Web detected. Waiting for QR code...")
                 try:
+                    snapshot = await self.inspect_whatsapp_state(session)
+                    self._set_session_runtime_state(
+                        session,
+                        state=snapshot.get('state') or 'connecting',
+                        qr=snapshot.get('qr'),
+                        owner_jid=snapshot.get('owner_jid'),
+                        profile_name=snapshot.get('profile_name'),
+                        profile_picture_url=snapshot.get('profile_picture_url'),
+                    )
                     # Try to find the QR code data attribute if it exists in the DOM
                     await session.page.wait_for_selector("canvas", timeout=10000)
                     qr_data = await session.page.evaluate("""() => {
@@ -464,10 +622,11 @@ class PlaywrightService:
                         return div ? div.getAttribute('data-ref') : null;
                     }""")
                     if qr_data:
-                        session.emit('qr', qr_data)
+                        self._set_session_runtime_state(session, state='connecting', qr=qr_data)
                     logger.info("QR Code detected! ✅")
                 except:
                     logger.warning("QR Code detection timeout. Starting stream anyway.")
+                self.start_whatsapp_state_monitor(session)
 
             self.start_stream(session)
         except Exception as e:
@@ -525,12 +684,26 @@ class PlaywrightService:
                     pass
                 except Exception as e:
                     logger.debug("screenshot task join: %s", e)
+            if session.state_task:
+                t = session.state_task
+                session.state_task = None
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    logger.debug("state task join: %s", e)
             try:
                 if session.page: await session.page.close()
                 if session.context: await session.context.close()
                 if session.browser: await session.browser.close()
             except Exception as e:
                 logger.error(f"Error destroying session {session_id}: {e}")
+
+            session.connection_state = 'close'
+            session.last_qr = None
+            session.last_qr_at = None
 
             if remove_metadata:
                 self.sessions.pop(session_id, None)
