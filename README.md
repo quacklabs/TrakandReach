@@ -5,6 +5,7 @@ A Playwright orchestration engine for Python, designed for high-performance brow
 ## Features
 
 - **Full Documentation**: See [DOCUMENTATION.md](DOCUMENTATION.md) for a deep dive.
+- **Embedding in another repo**: See [INTEGRATION.md](INTEGRATION.md) (dependency lines, deploy refresh, `is_engine_ready()`, Flask notes).
 - **Asynchronous Orchestration**: Built on Python's `asyncio` and Playwright for maximum efficiency.
 - **WebSocket Streaming**: Real-time screenshot streaming via resilient WebSockets.
 - **Flask Integration**: Easy-to-use Flask extension for managing browser sessions.
