@@ -3,6 +3,7 @@
 Trakand Reach is a professional-grade Playwright orchestration engine for Python. It is designed to be a high-performance, resilient, and lightweight replacement for complex tools like the Evolution API, specifically for WhatsApp Web automation and bot development.
 
 ## Table of Contents
+0. [Embedding in another project](INTEGRATION.md) — dependency lines, readiness checks, deploy
 1. [Architecture](#architecture)
 2. [Installation](#installation)
 3. [Multi-Instance Management](#multi-instance-management)
