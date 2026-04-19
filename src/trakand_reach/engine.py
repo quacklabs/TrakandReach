@@ -151,6 +151,10 @@ class PlaywrightService:
         self.pw = None
         self.is_running = False
         self._lifecycle_lock = asyncio.Lock()
+        self.warmed_browsers: set[str] = set()
+        self.warmup_browser: Optional[str] = None
+        self.last_warmup_error: Optional[str] = None
+        self.last_start_error: Optional[str] = None
 
     async def start(self, auto_resume: bool = True):
         async with self._lifecycle_lock:
@@ -158,15 +162,19 @@ class PlaywrightService:
                 return
             logger.info("⏳ Initializing automation engine...")
             try:
+                self.last_start_error = None
                 self.pw = await async_playwright().start()
                 self.load_sessions()
+                await self.warm_browser("webkit")
                 self.is_running = True
                 logger.info("Automation engine loaded! ✅")
                 if auto_resume:
                     asyncio.create_task(self.resume_all_sessions())
             except Exception as e:
                 logger.error(f"Failed to initialize engine ❌: {e}")
+                self.last_start_error = str(e)
                 self.is_running = False
+                self.warmed_browsers.clear()
                 if self.pw:
                     try:
                         await self.pw.stop()
@@ -222,6 +230,8 @@ class PlaywrightService:
         async with self._lifecycle_lock:
             self.save_sessions()
             self.is_running = False
+            self.warmed_browsers.clear()
+            self.warmup_browser = None
             for session_id in list(self.sessions.keys()):
                 await self.destroy_session(session_id, remove_metadata=False)
             if self.pw:
@@ -230,6 +240,55 @@ class PlaywrightService:
                 except Exception as e:
                     logger.warning("Playwright stop raised: %s", e)
                 self.pw = None
+
+    async def warm_browser(self, browser_type: str = 'webkit'):
+        browser_type = self.parse_browser(browser_type)
+        if browser_type in self.warmed_browsers:
+            return
+        if not self.pw:
+            raise RuntimeError("Playwright is not started")
+
+        logger.info("Warming %s browser...", browser_type)
+        self.warmup_browser = browser_type
+        self.last_warmup_error = None
+        browser = None
+        page = None
+        try:
+            pw_browser_type = getattr(self.pw, browser_type)
+            browser = await pw_browser_type.launch(headless=True)
+            page = await browser.new_page()
+            await page.goto('about:blank', wait_until='domcontentloaded', timeout=10000)
+            self.warmed_browsers.add(browser_type)
+            logger.info("%s browser warmed ✅", browser_type)
+        except Exception as e:
+            self.last_warmup_error = str(e)
+            self.warmed_browsers.discard(browser_type)
+            logger.error("Failed to warm %s browser ❌: %s", browser_type, e)
+            raise
+        finally:
+            self.warmup_browser = None
+            if page:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+            if browser:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+
+    def health_snapshot(self) -> Dict[str, Any]:
+        return {
+            "engine_running": bool(self.is_running),
+            "playwright_started": self.pw is not None,
+            "sessions_active": len(self.sessions),
+            "webkit_warmed": "webkit" in self.warmed_browsers,
+            "warmup_in_progress": self.warmup_browser is not None,
+            "warmup_browser": self.warmup_browser,
+            "last_warmup_error": self.last_warmup_error,
+            "last_start_error": self.last_start_error,
+        }
 
     def parse_browser(self, input_str: str) -> str:
         input_str = input_str.lower()
