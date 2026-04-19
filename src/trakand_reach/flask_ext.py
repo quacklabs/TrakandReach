@@ -184,6 +184,9 @@ class TrakandReach:
                 logger.exception("TrakandReach engine failed to start")
                 raise
             self._loop_ready_event.set()
+            # Yield once so asyncio marks the loop as running; some websockets builds call
+            # get_running_loop() during serve() setup.
+            await asyncio.sleep(0)
             async with websocket_serve(
                 self.engine.handle_websocket,
                 "0.0.0.0",
