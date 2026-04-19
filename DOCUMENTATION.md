@@ -65,17 +65,20 @@ Inspired by the `Baileys` library, Trakand Reach uses an event-driven model.
 | Event | Data | Description |
 |---|---|---|
 | `qr` | `string` | Emitted when a new WhatsApp QR code is generated. |
-| `message` | `dict` | Emitted when a new message is received (`{text, sender}`). |
+| `message` | `dict` | Emitted when a new message is received (`{text, sender, sender_id}`). |
 | `connection` | `dict` | Emitted when the connection state changes. |
 
 ### Using Hooks in Flask
 ```python
 @reach.on('message')
 def handle_message(data):
-    print(f"New Message: {data['text']} from {data['sender']}")
-    # Auto-reply logic
+    # data['sender_id'] contains the unique phone number
+    print(f"New Message: {data['text']} from {data['sender_id']}")
+
+    # Auto-reply logic using precision targeting
     if "help" in data['text'].lower():
-        reach.send_message(session_id="...", to=data['sender'], text="How can I help?")
+        # Passing sender_id (phone number) ensures precision
+        reach.send_message(session_id="...", to=data['sender_id'], text="How can I help?")
 ```
 
 ---

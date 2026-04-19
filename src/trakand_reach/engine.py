@@ -290,7 +290,18 @@ class PlaywrightService:
                                                 const text = textNode.innerText;
                                                 const meta = node.querySelector('.copyable-text');
                                                 const sender = meta ? meta.getAttribute('data-pre-plain-text') : 'unknown';
-                                                window.trakand_emit('message_new', { text, sender });
+
+                                                // Try to extract unique sender ID from data-id (e.g., true_1234567890@c.us_...)
+                                                let sender_id = 'unknown';
+                                                const msgId = node.getAttribute('data-id');
+                                                if (msgId && msgId.includes('_')) {
+                                                    const parts = msgId.split('_');
+                                                    if (parts.length > 1) {
+                                                        sender_id = parts[1].split('@')[0];
+                                                    }
+                                                }
+
+                                                window.trakand_emit('message_new', { text, sender, sender_id });
                                             }
                                         }
                                     }
@@ -423,24 +434,38 @@ class PlaywrightService:
                     s.ws = None
 
     async def send_whatsapp_message(self, session_id: str, to: str, text: str):
+        """
+        Send a WhatsApp message with precision.
+        'to' can be a name (for search) or a phone number (e.g., '1234567890').
+        """
         session = self.sessions.get(session_id)
         if not session or not session.page:
             raise ValueError("Session or page not found")
 
-        # Navigate to the chat if not already there (this is a simplified implementation)
-        # In a real bot, we might use the search bar or direct URLs if supported
         try:
-            # WhatsApp Web search and send logic
-            # This is a bit fragile as it relies on specific classes
-            search_selector = 'div[contenteditable="true"][data-tab="3"]'
-            await session.page.fill(search_selector, to)
-            await session.page.keyboard.press("Enter")
-            await asyncio.sleep(1) # wait for chat to load
+            # Check if 'to' looks like a phone number (digits only, at least 10 chars)
+            is_phone = to.isdigit() and len(to) >= 10
 
-            message_input = 'div[contenteditable="true"][data-tab="10"]'
+            if is_phone:
+                # Use direct URL for precision targeting
+                logger.info(f"Targeting phone number: {to}")
+                url = f"https://web.whatsapp.com/send?phone={to}"
+                await session.page.goto(url, wait_until='domcontentloaded')
+                # Wait for the message input to appear, which indicates the chat is loaded
+                message_input = 'div[contenteditable="true"][data-tab="10"]'
+                await session.page.wait_for_selector(message_input, timeout=15000)
+            else:
+                # Use search for names
+                logger.info(f"Searching for contact: {to}")
+                search_selector = 'div[contenteditable="true"][data-tab="3"]'
+                await session.page.fill(search_selector, to)
+                await session.page.keyboard.press("Enter")
+                await asyncio.sleep(2) # wait for chat to load
+                message_input = 'div[contenteditable="true"][data-tab="10"]'
+
             await session.page.fill(message_input, text)
             await session.page.keyboard.press("Enter")
             logger.info(f"Message sent to {to} ✅")
         except Exception as e:
-            logger.error(f"Failed to send message: {e}")
+            logger.error(f"Failed to send message to {to}: {e}")
             raise
