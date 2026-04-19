@@ -32,6 +32,7 @@ class TrakandReach:
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: threading.Thread | None = None
         self._loop_ready_event = threading.Event()
+        self._thread_lock = threading.Lock()
         self._init_app_done = False
 
         self.hooks = {
@@ -70,11 +71,28 @@ class TrakandReach:
 
         @app.route("/reach/health", methods=["GET"])
         def health():
-            return jsonify(
-                {
-                    "status": "ok",
+            snap = (
+                self.engine.health_snapshot()
+                if hasattr(self.engine, "health_snapshot")
+                else {
                     "engine_running": self.engine.is_running,
                     "sessions_active": len(self.engine.sessions),
+                }
+            )
+            loop_ready = bool(
+                self._thread is not None
+                and self._thread.is_alive()
+                and self._loop_ready_event.is_set()
+                and self.loop is not None
+                and not self.loop.is_closed()
+            )
+            return jsonify(
+                {
+                    "status": "ok" if loop_ready and snap.get("engine_running") and snap.get("webkit_warmed", True) else "degraded",
+                    **snap,
+                    "loop_ready": loop_ready,
+                    "thread_alive": bool(self._thread is not None and self._thread.is_alive()),
+                    "ws_port": self.ws_port,
                 }
             )
 
@@ -161,15 +179,39 @@ class TrakandReach:
         return future.result(timeout=timeout)
 
     def start_background_engine(self):
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._loop_ready_event.clear()
-        self._thread = threading.Thread(
-            target=self._run_event_loop,
-            daemon=True,
-            name="trakand-reach-asyncio",
+        with self._thread_lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._loop_ready_event.clear()
+            self._thread = threading.Thread(
+                target=self._run_event_loop,
+                daemon=True,
+                name="trakand-reach-asyncio",
+            )
+            self._thread.start()
+
+    def ensure_engine_running(self, wait_timeout: float = 10.0) -> bool:
+        loop = self.loop
+        if (
+            self._thread is not None
+            and self._thread.is_alive()
+            and loop is not None
+            and not loop.is_closed()
+            and self._loop_ready_event.is_set()
+            and self.engine.is_running
+        ):
+            return True
+        self.start_background_engine()
+        self._loop_ready_event.wait(wait_timeout)
+        loop = self.loop
+        return bool(
+            self._thread is not None
+            and self._thread.is_alive()
+            and loop is not None
+            and not loop.is_closed()
+            and self._loop_ready_event.is_set()
+            and self.engine.is_running
         )
-        self._thread.start()
 
     def _run_event_loop(self):
         loop = asyncio.new_event_loop()
@@ -184,6 +226,9 @@ class TrakandReach:
                 logger.exception("TrakandReach engine failed to start")
                 raise
             self._loop_ready_event.set()
+            # Yield once so asyncio marks the loop as running; some websockets builds call
+            # get_running_loop() during serve() setup.
+            await asyncio.sleep(0)
             async with websocket_serve(
                 self.engine.handle_websocket,
                 "0.0.0.0",
@@ -202,6 +247,26 @@ class TrakandReach:
         finally:
             self._loop_ready_event.clear()
             self.loop = None
+            self.engine.is_running = False
+            try:
+                pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+            except Exception:
+                pending = []
+            for task in pending:
+                task.cancel()
+            if pending:
+                try:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                except Exception:
+                    logger.debug("TrakandReach pending-task drain failed", exc_info=True)
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:
+                logger.debug("TrakandReach asyncgen shutdown failed", exc_info=True)
+            try:
+                loop.close()
+            except Exception:
+                logger.debug("TrakandReach loop close failed", exc_info=True)
 
     async def setup_whatsapp(self, device_info):
         session = await self.engine.create_session("whatsapp-key", device_info)
@@ -230,8 +295,10 @@ class TrakandReach:
 
     def is_engine_ready(self) -> bool:
         """True when the background loop is running, Playwright has started, and the WS server is up."""
+        health = self.engine.health_snapshot() if hasattr(self.engine, "health_snapshot") else {}
         return (
             self.loop is not None
             and self._loop_ready_event.is_set()
             and self.engine.is_running
+            and health.get("webkit_warmed", True)
         )
