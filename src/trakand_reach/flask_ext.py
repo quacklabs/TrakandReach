@@ -131,6 +131,7 @@ class TrakandReach:
             await self.engine.start()
             # websockets ≥12: serve() must run inside the loop (async with), not as a bare coroutine
             # passed to run_until_complete without a running loop during Server setup.
+            await asyncio.sleep(0)
             async with ws_serve(
                 self.engine.handle_websocket,
                 "0.0.0.0",
