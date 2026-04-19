@@ -138,5 +138,48 @@ def whatsapp(port, url):
 
     loop.run_until_complete(run_whatsapp())
 
+@main.command()
+@click.option('--port', default=3000, help='WebSocket port')
+def bot(port):
+    """Start a sample WhatsApp auto-reply bot"""
+    click.echo(f"Starting Trakand Reach Bot on port {port}...")
+    engine = PlaywrightService()
+    loop = asyncio.get_event_loop()
+
+    async def run_bot():
+        await engine.start()
+        device_info = {
+            "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+            "width": 1280,
+            "height": 720,
+            "pixelRatio": 1.0,
+            "fingerprint": "bot-session"
+        }
+        session = await engine.create_session("bot-key", device_info)
+
+        # Define listeners
+        async def on_qr(data):
+            click.echo(f"\n[QR CODE RECEIVED]\n{data}\n")
+
+        async def on_message(data):
+            text = data.get('text', '')
+            sender = data.get('sender', 'unknown')
+            click.echo(f"New message from {sender}: {text}")
+
+            # Simple auto-reply
+            if "hello" in text.lower():
+                click.echo(f"Auto-replying to {sender}...")
+                await engine.send_whatsapp_message(session.id, sender, "Hello! I am a Trakand Reach Bot. How can I help you today?")
+
+        session.event_listeners['qr'].append(on_qr)
+        session.event_listeners['message_new'].append(on_message)
+
+        async with websockets.serve(engine.handle_websocket, "0.0.0.0", port):
+            await engine.start_up_link(session.id, "https://web.whatsapp.com")
+            click.echo("Bot is running and listening for messages... ✅")
+            await asyncio.Future()
+
+    loop.run_until_complete(run_bot())
+
 if __name__ == "__main__":
     main()

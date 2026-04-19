@@ -11,7 +11,6 @@ from typing import Dict, Optional, Any, List
 from pathlib import Path
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
-from PIL import Image
 import websockets
 
 # Setup logging
@@ -62,6 +61,20 @@ class Session:
     is_alive: bool = True
     recovery_attempts: int = 0
     screenshot_task: Optional[asyncio.Task] = None
+    event_listeners: Dict[str, List[Any]] = field(default_factory=lambda: {
+        'qr': [],
+        'connection_update': [],
+        'message_new': [],
+        'creds_update': []
+    })
+
+    def emit(self, event: str, *args, **kwargs):
+        if event in self.event_listeners:
+            for listener in self.event_listeners[event]:
+                if asyncio.iscoroutinefunction(listener):
+                    asyncio.create_task(listener(*args, **kwargs))
+                else:
+                    listener(*args, **kwargs)
 
     def to_dict(self):
         d = {
@@ -249,16 +262,53 @@ class PlaywrightService:
             session.page = await session.context.new_page()
 
         try:
+            if "web.whatsapp.com" in url:
+                # Inject a script to listen for new messages
+                await session.context.add_init_script("""
+                    window.trakand_reach_hook = () => {
+                        console.log("WhatsApp Web hooks initialized");
+                        const observer = new MutationObserver((mutations) => {
+                            for (const mutation of mutations) {
+                                if (mutation.addedNodes && mutation.addedNodes.length > 0) {
+                                    for (const node of mutation.addedNodes) {
+                                        // Look for message containers
+                                        if (node.nodeType === 1 && (node.classList.contains('message-in') || node.getAttribute('data-id'))) {
+                                            const textNode = node.querySelector('.copyable-text span');
+                                            if (textNode) {
+                                                const text = textNode.innerText;
+                                                const meta = node.querySelector('.copyable-text');
+                                                const sender = meta ? meta.getAttribute('data-pre-plain-text') : 'unknown';
+                                                window.trakand_emit('message_new', { text, sender });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                        observer.observe(document.body, { childList: true, subtree: true });
+                    };
+                    window.addEventListener('load', window.trakand_reach_hook);
+                """)
+
+                await session.page.expose_function("trakand_emit", lambda event, data: session.emit(event, data))
+
             await session.page.goto(url, wait_until='domcontentloaded', timeout=30000)
 
             # Special handling for WhatsApp Web QR code
             if "web.whatsapp.com" in url:
                 logger.info("WhatsApp Web detected. Waiting for QR code...")
                 try:
+                    # Try to find the QR code data attribute if it exists in the DOM
                     await session.page.wait_for_selector("canvas", timeout=10000)
-                    logger.info("QR Code canvas detected! ✅")
+                    qr_data = await session.page.evaluate("""() => {
+                        const div = document.querySelector('div[data-ref]');
+                        return div ? div.getAttribute('data-ref') : null;
+                    }""")
+                    if qr_data:
+                        session.emit('qr', qr_data)
+                    logger.info("QR Code detected! ✅")
                 except:
-                    logger.warning("QR Code canvas not found within timeout. Starting stream anyway.")
+                    logger.warning("QR Code detection timeout. Starting stream anyway.")
 
             self.start_stream(session)
         except Exception as e:
@@ -359,3 +409,26 @@ class PlaywrightService:
             for s in self.sessions.values():
                 if s.ws == ws:
                     s.ws = None
+
+    async def send_whatsapp_message(self, session_id: str, to: str, text: str):
+        session = self.sessions.get(session_id)
+        if not session or not session.page:
+            raise ValueError("Session or page not found")
+
+        # Navigate to the chat if not already there (this is a simplified implementation)
+        # In a real bot, we might use the search bar or direct URLs if supported
+        try:
+            # WhatsApp Web search and send logic
+            # This is a bit fragile as it relies on specific classes
+            search_selector = 'div[contenteditable="true"][data-tab="3"]'
+            await session.page.fill(search_selector, to)
+            await session.page.keyboard.press("Enter")
+            await asyncio.sleep(1) # wait for chat to load
+
+            message_input = 'div[contenteditable="true"][data-tab="10"]'
+            await session.page.fill(message_input, text)
+            await session.page.keyboard.press("Enter")
+            logger.info(f"Message sent to {to} ✅")
+        except Exception as e:
+            logger.error(f"Failed to send message: {e}")
+            raise

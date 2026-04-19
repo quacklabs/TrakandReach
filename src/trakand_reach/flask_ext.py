@@ -19,8 +19,21 @@ class TrakandReach:
         self.loop = None
         self._thread = None
 
+        self.hooks = {
+            'qr': [],
+            'message': [],
+            'connection': []
+        }
         if app is not None:
             self.init_app(app)
+
+    def on(self, event_name: str):
+        """Decorator to register hooks"""
+        def decorator(f):
+            if event_name in self.hooks:
+                self.hooks[event_name].append(f)
+            return f
+        return decorator
 
     def init_app(self, app: Flask):
         self.app = app
@@ -83,8 +96,28 @@ class TrakandReach:
                 "message": "WhatsApp session initiated. Connect to WebSocket to scan QR code."
             })
 
+        @app.route('/reach/send', methods=['POST'])
+        def send_message():
+            data = request.json
+            self.send_message(
+                data.get('session_id'),
+                data.get('to'),
+                data.get('text')
+            )
+            return jsonify({"status": "sent"})
+
         # Start the background engine
         self.start_background_engine()
+
+    def send_message(self, session_id, to, text):
+        """Send a message through a specific session"""
+        if not self.loop:
+            raise RuntimeError("Engine not started")
+        future = asyncio.run_coroutine_threadsafe(
+            self.engine.send_whatsapp_message(session_id, to, text),
+            self.loop
+        )
+        return future.result()
 
     def start_background_engine(self):
         self._thread = threading.Thread(target=self._run_event_loop, daemon=True)
@@ -109,6 +142,12 @@ class TrakandReach:
 
     async def setup_whatsapp(self, device_info):
         session = await self.engine.create_session("whatsapp-key", device_info)
+
+        # Register hooks into the session
+        session.event_listeners['qr'].extend(self.hooks['qr'])
+        session.event_listeners['message_new'].extend(self.hooks['message'])
+        session.event_listeners['connection_update'].extend(self.hooks['connection'])
+
         # We don't block on start_up_link here to return to Flask quickly
         asyncio.create_task(self.engine.start_up_link(session.id, "https://web.whatsapp.com"))
         return session.id
