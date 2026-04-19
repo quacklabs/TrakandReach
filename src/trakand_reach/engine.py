@@ -108,7 +108,7 @@ class PlaywrightService:
         self.pw = None
         self.is_running = False
 
-    async def start(self):
+    async def start(self, auto_resume: bool = True):
         if self.is_running:
             return
         logger.info("⏳ Initializing automation engine...")
@@ -117,6 +117,8 @@ class PlaywrightService:
             self.load_sessions()
             self.is_running = True
             logger.info("Automation engine loaded! ✅")
+            if auto_resume:
+                asyncio.create_task(self.resume_all_sessions())
         except Exception as e:
             logger.error(f"Failed to initialize engine ❌: {e}")
             raise
@@ -153,6 +155,16 @@ class PlaywrightService:
                 json.dump(data, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to save sessions: {e}")
+
+    async def resume_all_sessions(self):
+        logger.info(f"Auto-resuming {len(self.sessions)} sessions...")
+        for session_id, session in self.sessions.items():
+            if session.last_url:
+                try:
+                    logger.info(f"Resuming session {session_id} -> {session.last_url}")
+                    await self.start_up_link(session_id, session.last_url)
+                except Exception as e:
+                    logger.error(f"Failed to resume session {session_id}: {e}")
 
     async def stop(self):
         self.save_sessions()

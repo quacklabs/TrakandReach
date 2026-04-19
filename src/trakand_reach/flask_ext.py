@@ -152,5 +152,13 @@ class TrakandReach:
         asyncio.create_task(self.engine.start_up_link(session.id, "https://web.whatsapp.com"))
         return session.id
 
+    def get_sessions(self):
+        """Return a list of all managed sessions"""
+        return self.engine.sessions
+
+    def get_session(self, session_id):
+        """Return a specific session"""
+        return self.engine.sessions.get(session_id)
+
     def is_alive(self):
         return self.engine.is_running
