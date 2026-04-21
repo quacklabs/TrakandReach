@@ -275,42 +275,81 @@ class PlaywrightService:
 
         try:
             if "web.whatsapp.com" in url:
-                # Inject a script to listen for new messages
+                # Inject a robust script to bridge into WhatsApp's internal modules
                 await session.context.add_init_script("""
-                    window.trakand_reach_hook = () => {
-                        console.log("WhatsApp Web hooks initialized");
-                        const observer = new MutationObserver((mutations) => {
-                            for (const mutation of mutations) {
-                                if (mutation.addedNodes && mutation.addedNodes.length > 0) {
-                                    for (const node of mutation.addedNodes) {
-                                        // Look for message containers
-                                        if (node.nodeType === 1 && (node.classList.contains('message-in') || node.getAttribute('data-id'))) {
-                                            const textNode = node.querySelector('.copyable-text span');
-                                            if (textNode) {
-                                                const text = textNode.innerText;
-                                                const meta = node.querySelector('.copyable-text');
-                                                const sender = meta ? meta.getAttribute('data-pre-plain-text') : 'unknown';
-
-                                                // Try to extract unique sender ID from data-id (e.g., true_1234567890@c.us_...)
-                                                let sender_id = 'unknown';
-                                                const msgId = node.getAttribute('data-id');
-                                                if (msgId && msgId.includes('_')) {
-                                                    const parts = msgId.split('_');
-                                                    if (parts.length > 1) {
-                                                        sender_id = parts[1].split('@')[0];
-                                                    }
-                                                }
-
-                                                window.trakand_emit('message_new', { text, sender, sender_id });
-                                            }
-                                        }
+                    window.trakand_reach_bridge = {
+                        init: function() {
+                            console.log("Trakand Reach Bridge: Initializing...");
+                            this.setupObserver();
+                            this.tryInjectStore();
+                        },
+                        tryInjectStore: function() {
+                            // Attempt to find WhatsApp internal Store modules
+                            const interval = setInterval(() => {
+                                if (window.mR) {
+                                    const modules = window.mR.modules;
+                                    const storeModule = Object.values(modules).find(m => m.exports && m.exports.default && m.exports.default.Chat);
+                                    if (storeModule) {
+                                        window.WWebStore = storeModule.exports.default;
+                                        console.log("Trakand Reach Bridge: Store injected! ✅");
+                                        clearInterval(interval);
                                     }
                                 }
+                            }, 1000);
+                        },
+                        setupObserver: function() {
+                            const observer = new MutationObserver((mutations) => {
+                                for (const mutation of mutations) {
+                                    mutation.addedNodes.forEach(node => {
+                                        if (node.nodeType === 1) {
+                                            this.processNode(node);
+                                        }
+                                    });
+                                }
+                            });
+                            observer.observe(document.body, { childList: true, subtree: true });
+                        },
+                        processNode: function(node) {
+                            // Support multiple WhatsApp Web versions by checking common attributes
+                            const isMsg = node.classList.contains('message-in') ||
+                                         node.hasAttribute('data-id') ||
+                                         node.querySelector('[data-pre-plain-text]');
+
+                            if (isMsg) {
+                                try {
+                                    const textNode = node.querySelector('span.selectable-text, .copyable-text span');
+                                    if (!textNode) return;
+
+                                    const text = textNode.innerText;
+                                    const msgId = node.getAttribute('data-id') ||
+                                                 node.closest('[data-id]')?.getAttribute('data-id');
+
+                                    if (!msgId) return;
+
+                                    // Extract sender info
+                                    let sender_id = 'unknown';
+                                    if (msgId.includes('_')) {
+                                        const parts = msgId.split('_');
+                                        if (parts.length > 1) {
+                                            sender_id = parts[1].split('@')[0];
+                                        }
+                                    }
+
+                                    const meta = node.querySelector('.copyable-text');
+                                    const sender = meta ? meta.getAttribute('data-pre-plain-text') : sender_id;
+
+                                    // Prevent duplicate emissions for the same message ID
+                                    if (window.last_msg_id === msgId) return;
+                                    window.last_msg_id = msgId;
+
+                                    window.trakand_emit('message_new', { text, sender, sender_id, msgId });
+                                } catch (e) {
+                                    console.error("Bridge Error processing node:", e);
+                                }
                             }
-                        });
-                        observer.observe(document.body, { childList: true, subtree: true });
+                        }
                     };
-                    window.addEventListener('load', window.trakand_reach_hook);
+                    window.addEventListener('load', () => window.trakand_reach_bridge.init());
                 """)
 
                 await session.page.expose_function("trakand_emit", lambda event, data: session.emit(event, data))
@@ -435,37 +474,73 @@ class PlaywrightService:
 
     async def send_whatsapp_message(self, session_id: str, to: str, text: str):
         """
-        Send a WhatsApp message with precision.
-        'to' can be a name (for search) or a phone number (e.g., '1234567890').
+        Send a WhatsApp message with 'tighter hooks'.
+        Attempts to use internal Store modules first, falling back to UI automation.
         """
         session = self.sessions.get(session_id)
         if not session or not session.page:
             raise ValueError("Session or page not found")
 
         try:
-            # Check if 'to' looks like a phone number (digits only, at least 10 chars)
-            is_phone = to.isdigit() and len(to) >= 10
+            # Attempt internal module injection for sending
+            # This bypasses the need for UI interaction entirely if successful
+            result = await session.page.evaluate(f"""
+                async (to, text) => {{
+                    if (window.WWebStore && window.WWebStore.Chat && window.WWebStore.SendTextMsgToChat) {{
+                        const jid = to.includes('@') ? to : to + '@c.us';
+                        const chat = window.WWebStore.Chat.get(jid);
+                        if (chat) {{
+                            await window.WWebStore.SendTextMsgToChat(chat, text);
+                            return {{ success: true, method: 'internal' }};
+                        }}
+                    }}
+                    return {{ success: false }};
+                }}
+            """, to, text)
 
+            if result.get('success'):
+                logger.info(f"Message sent to {to} via internal bridge ✅")
+                return
+
+            # Fallback to UI Automation
+            logger.info(f"Internal bridge unavailable. Falling back to UI automation for {to}...")
+
+            # 1. Navigate to the contact
+            is_phone = to.isdigit() and len(to) >= 10
             if is_phone:
-                # Use direct URL for precision targeting
-                logger.info(f"Targeting phone number: {to}")
                 url = f"https://web.whatsapp.com/send?phone={to}"
-                await session.page.goto(url, wait_until='domcontentloaded')
-                # Wait for the message input to appear, which indicates the chat is loaded
-                message_input = 'div[contenteditable="true"][data-tab="10"]'
-                await session.page.wait_for_selector(message_input, timeout=15000)
+                if f"phone={to}" not in session.page.url:
+                    await session.page.goto(url, wait_until='domcontentloaded')
             else:
-                # Use search for names
-                logger.info(f"Searching for contact: {to}")
                 search_selector = 'div[contenteditable="true"][data-tab="3"]'
                 await session.page.fill(search_selector, to)
                 await session.page.keyboard.press("Enter")
-                await asyncio.sleep(2) # wait for chat to load
-                message_input = 'div[contenteditable="true"][data-tab="10"]'
+                await asyncio.sleep(1)
 
-            await session.page.fill(message_input, text)
-            await session.page.keyboard.press("Enter")
-            logger.info(f"Message sent to {to} ✅")
+            # 2. Find and interact with input
+            input_selectors = [
+                'footer div[contenteditable="true"]',
+                'div[contenteditable="true"][data-tab="10"]',
+                '#main footer div.selectable-text'
+            ]
+
+            input_element = None
+            for selector in input_selectors:
+                try:
+                    input_element = await session.page.wait_for_selector(selector, timeout=5000)
+                    if input_element: break
+                except: continue
+
+            if input_element:
+                await input_element.fill(text)
+                await asyncio.sleep(0.5)
+                await session.page.keyboard.press("Enter")
+            else:
+                # Last ditch effort: blind typing
+                await session.page.keyboard.type(text)
+                await session.page.keyboard.press("Enter")
+
+            logger.info(f"Message sent to {to} via UI fallback ✅")
         except Exception as e:
             logger.error(f"Failed to send message to {to}: {e}")
             raise
