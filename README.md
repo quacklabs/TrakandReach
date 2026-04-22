@@ -23,6 +23,11 @@ go build -o trakand-reach ./cmd/trakand-reach/main.go
 sudo ./trakand-reach setup --port 3000
 ```
 
+### 3. Spin up an instance
+```bash
+./trakand-reach whatsapp account_name
+```
+
 ## Usage as a Microservice
 
 ### REST API

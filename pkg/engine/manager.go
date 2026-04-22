@@ -249,6 +249,14 @@ func (m *Manager) updateSessionState(id string, data interface{}) {
 	}
 }
 
+func (m *Manager) GetSession(id string) (*SessionInstance, bool) {
+	val, ok := m.sessions.Load(id)
+	if !ok {
+		return nil, false
+	}
+	return val.(*SessionInstance), true
+}
+
 func (m *Manager) SendMessage(sessionID, to, text string) error {
 	val, ok := m.sessions.Load(sessionID)
 	if !ok {

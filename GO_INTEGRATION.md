@@ -24,18 +24,29 @@ func main() {
 	manager, _ := engine.NewManager(repo)
 	manager.Start()
 
-	// Start a session
-	session := &models.Session{
-		ID: "my-account",
-		DeviceInfo: models.DeviceInfo{
-			UserAgent: "Mozilla/5.0...",
-			Width: 1280,
-			Height: 720,
-		},
-		LastURL: "https://web.whatsapp.com",
-	}
+	// Start multiple sessions
+	accounts := []string{"marketing-1", "support-core", "bot-alpha"}
 
-	inst, _ := manager.StartSession(session)
+	for _, id := range accounts {
+		session := &models.Session{
+			ID: id,
+			DeviceInfo: models.DeviceInfo{
+				UserAgent: "Mozilla/5.0...",
+				Width: 1280,
+				Height: 720,
+			},
+			LastURL: "https://web.whatsapp.com",
+		}
+
+		inst, _ := manager.StartSession(session)
+
+		// Each instance has its own event channel
+		go func(accountID string, events chan engine.Event) {
+			for ev := range events {
+				log.Printf("[%s] Received event: %s", accountID, ev.Type)
+			}
+		}(id, inst.Events)
+	}
 
 	// Listen for events
 	go func() {

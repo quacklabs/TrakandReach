@@ -136,9 +136,15 @@ WantedBy=multi-user.target
 	}
 
 	var whatsappCmd = &cobra.Command{
-		Use:   "whatsapp",
+		Use:   "whatsapp [account_name]",
 		Short: "Quick start WhatsApp Web session",
+		Args:  cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
+			accountName := "whatsapp-default"
+			if len(args) > 0 {
+				accountName = args[0]
+			}
+
 			home, _ := os.UserHomeDir()
 			dbPath := filepath.Join(home, ".trakand_reach", "reach.db")
 			repo, _ := db.NewRepository(dbPath)
@@ -147,7 +153,7 @@ WantedBy=multi-user.target
 			defer manager.Stop()
 
 			session := &models.Session{
-				ID: "whatsapp-default",
+				ID: accountName,
 				DeviceInfo: models.DeviceInfo{
 					UserAgent:  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
 					Width:      1280,
@@ -166,9 +172,15 @@ WantedBy=multi-user.target
 	}
 
 	var botCmd = &cobra.Command{
-		Use:   "bot",
+		Use:   "bot [account_name]",
 		Short: "Start a sample auto-reply bot",
+		Args:  cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
+			accountName := "bot-session"
+			if len(args) > 0 {
+				accountName = args[0]
+			}
+
 			home, _ := os.UserHomeDir()
 			dbPath := filepath.Join(home, ".trakand_reach", "reach.db")
 			repo, _ := db.NewRepository(dbPath)
@@ -177,7 +189,7 @@ WantedBy=multi-user.target
 			defer manager.Stop()
 
 			session := &models.Session{
-				ID: "bot-session",
+				ID: accountName,
 				DeviceInfo: models.DeviceInfo{
 					UserAgent:  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
 					Width:      1280,

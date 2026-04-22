@@ -43,3 +43,11 @@ func (r *Reach) CreateSession(s *models.Session) (*engine.SessionInstance, error
 func (r *Reach) SendMessage(sessionID, to, text string) error {
 	return r.Manager.SendMessage(sessionID, to, text)
 }
+
+func (r *Reach) GetSessions() ([]*models.Session, error) {
+	return r.Repo.GetSessions()
+}
+
+func (r *Reach) GetActiveSession(id string) (*engine.SessionInstance, bool) {
+	return r.Manager.GetSession(id)
+}

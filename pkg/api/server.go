@@ -115,9 +115,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		select {
 		case ev := <-inst.Events:
 			conn.WriteJSON(map[string]interface{}{
-				"type": "event",
-				"name": ev.Type,
-				"data": ev.Data,
+				"type":    "event",
+				"account": ev.SessionID,
+				"name":    ev.Type,
+				"data":    ev.Data,
 			})
 			// Forward to Webhook if configured
 			if inst.Model.WebhookURL != "" {
