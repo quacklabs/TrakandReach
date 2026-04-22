@@ -1,57 +1,50 @@
-# Trakand Reach
+# Trakand Reach (Go Port)
 
-A Playwright orchestration engine for Python, designed for high-performance browser automation and streaming.
+A high-performance, Evolution-grade Playwright orchestration engine written in Go. Designed for heavy-duty WhatsApp automation and microservice integration.
 
-## Features
-
-- **Full Documentation**: See [DOCUMENTATION.md](DOCUMENTATION.md) for a deep dive.
-- **Embedding in another repo**: See [INTEGRATION.md](INTEGRATION.md) (dependency lines, deploy refresh, `is_engine_ready()`, Flask notes).
-- **Asynchronous Orchestration**: Built on Python's `asyncio` and Playwright for maximum efficiency.
-- **WebSocket Streaming**: Real-time screenshot streaming via resilient WebSockets.
-- **Flask Integration**: Easy-to-use Flask extension for managing browser sessions.
-- **Standalone Mode**: Run as a standalone server with an integrated HTTP and WebSocket API.
-- **Systemd Support**: Built-in CLI for setting up as a Linux system service.
-- **Automatic Browser Management**: Installs WebKit automatically on the first run.
+## Key Features
+- **Evolution-API Grade**: Deep interception of WhatsApp messages via internal Store hooks.
+- **Microservice Ready**: Built-in webhook dispatcher with retry logic.
+- **Optimized Streaming**: Real-time WebP screenshot streaming via Binary WebSockets.
+- **Persistence**: SQLite 3 with WAL mode for high concurrency.
+- **Hands-free Deployment**: Automatic systemd service installation and management.
+- **Playwright Powered**: Uses WebKit for a lightweight yet powerful browser automation experience.
 
 ## Installation
 
-Install directly from the private GitHub repository:
-
+### 1. Build and Install
 ```bash
-pip install git+https://github.com/username/trakand-reach.git
+go build -o trakand-reach ./cmd/trakand-reach/main.go
+./trakand-reach install
 ```
 
-## Usage
-
-### Flask Extension
-
-```python
-from flask import Flask
-from trakand_reach import TrakandReach
-
-app = Flask(__name__)
-reach = TrakandReach(app)
-
-@app.route("/health")
-def health():
-    return {"status": "ok", "engine": reach.is_alive()}
-
-if __name__ == "__main__":
-    app.run()
+### 2. Setup as System Service
+```bash
+sudo ./trakand-reach setup --port 3000
 ```
 
-### Standalone Mode
+## Usage as a Microservice
 
-```bash
-trakand-reach run --port 3000
-```
+### REST API
+- `POST /reach/send`: Send a message.
+  ```json
+  {
+    "session_id": "account_1",
+    "to": "1234567890",
+    "text": "Hello from Trakand Reach Go!"
+  }
+  ```
 
-### Systemd Setup
+### WebSocket (Binary)
+Connect to `ws://localhost:3000/ws` to receive real-time binary WebP frames and events.
 
-```bash
-trakand-reach setup-service --user $(whoami)
+## Usage as a Library
+
+```go
+import "github.com/username/trakand-reach/pkg/reach"
+
+// Implementation details in GO_INTEGRATION.md
 ```
 
 ## License
-
 MIT
