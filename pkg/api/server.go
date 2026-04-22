@@ -40,6 +40,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) routes() {
 	s.mux.HandleFunc("/reach/health", s.handleHealth)
 	s.mux.HandleFunc("/reach/sessions", s.handleListSessions)
+	s.mux.HandleFunc("/reach/session", s.handleSession)
+	s.mux.HandleFunc("/reach/whatsapp", s.handleWhatsApp)
 	s.mux.HandleFunc("/reach/send", s.handleSendMessage)
 	s.mux.HandleFunc("/ws", s.handleWebSocket)
 }
@@ -51,7 +53,83 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
-	// Implementation deferred to manager/repo lookup
+	sessions, err := s.manager.GetPersistentSessions()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(sessions)
+}
+
+func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		var req struct {
+			SessionID  string            `json:"session_id"`
+			DeviceInfo models.DeviceInfo `json:"deviceInfo"`
+			LastURL    string            `json:"url"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		session := &models.Session{
+			ID:         req.SessionID,
+			DeviceInfo: req.DeviceInfo,
+			LastURL:    req.LastURL,
+			AccessKey:  "rest-api-key",
+		}
+
+		_, err := s.manager.StartSession(session)
+		if err != nil {
+			log.Printf("REST Session Init Error: %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{"status": "initialized", "session_id": req.SessionID})
+	} else if r.Method == http.MethodDelete {
+		sessionID := r.URL.Query().Get("id")
+		if sessionID == "" {
+			http.Error(w, "missing session id", http.StatusBadRequest)
+			return
+		}
+		s.manager.StopSession(sessionID)
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "stopped", "session_id": sessionID})
+	}
+}
+
+func (s *Server) handleWhatsApp(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	session := &models.Session{
+		ID: req.SessionID,
+		DeviceInfo: models.DeviceInfo{
+			UserAgent:  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+			Width:      1280,
+			Height:     720,
+			PixelRatio: 1.0,
+		},
+		LastURL: "https://web.whatsapp.com",
+	}
+
+	_, err := s.manager.StartSession(session)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{"status": "whatsapp_initiated", "session_id": req.SessionID})
 }
 
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {

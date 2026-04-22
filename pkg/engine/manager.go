@@ -257,6 +257,21 @@ func (m *Manager) GetSession(id string) (*SessionInstance, bool) {
 	return val.(*SessionInstance), true
 }
 
+func (m *Manager) GetPersistentSessions() ([]*models.Session, error) {
+	return m.repo.GetSessions()
+}
+
+func (m *Manager) StopSession(id string) {
+	val, ok := m.sessions.Load(id)
+	if !ok {
+		return
+	}
+	inst := val.(*SessionInstance)
+	inst.Page.Close()
+	inst.Context.Close()
+	m.sessions.Delete(id)
+}
+
 func (m *Manager) SendMessage(sessionID, to, text string) error {
 	val, ok := m.sessions.Load(sessionID)
 	if !ok {

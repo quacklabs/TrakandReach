@@ -31,6 +31,11 @@ sudo ./trakand-reach setup --port 3000
 ## Usage as a Microservice
 
 ### REST API
+- `GET /reach/health`: Engine health and warming status.
+- `GET /reach/sessions`: List all persistent sessions.
+- `POST /reach/session`: Create/Start a generic session.
+- `POST /reach/whatsapp`: Quick-start a WhatsApp-preconfigured session.
+- `DELETE /reach/session?id=account_1`: Gracefully stop a session.
 - `POST /reach/send`: Send a message.
   ```json
   {
