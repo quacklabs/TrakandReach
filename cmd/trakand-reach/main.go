@@ -17,6 +17,10 @@ import (
 )
 
 var port int
+var userAgent string
+var viewportWidth int
+var viewportHeight int
+var pixelRatio float64
 
 func main() {
 	var rootCmd = &cobra.Command{Use: "trakand-reach"}
@@ -138,12 +142,9 @@ WantedBy=multi-user.target
 	var whatsappCmd = &cobra.Command{
 		Use:   "whatsapp [session_id]",
 		Short: "Quick start a WhatsApp Web session",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			sessionID := "whatsapp-default"
-			if len(args) > 0 {
-				sessionID = args[0]
-			}
+			sessionID := args[0]
 
 			home, _ := os.UserHomeDir()
 			dbPath := filepath.Join(home, ".trakand_reach", "reach.db")
@@ -155,10 +156,10 @@ WantedBy=multi-user.target
 			session := &models.Session{
 				ID: sessionID,
 				DeviceInfo: models.DeviceInfo{
-					UserAgent:  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-					Width:      1280,
-					Height:     720,
-					PixelRatio: 1.0,
+					UserAgent:  userAgent,
+					Width:      viewportWidth,
+					Height:     viewportHeight,
+					PixelRatio: pixelRatio,
 				},
 				LastURL: "https://web.whatsapp.com",
 			}
@@ -170,16 +171,17 @@ WantedBy=multi-user.target
 			log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), server))
 		},
 	}
+	whatsappCmd.Flags().StringVar(&userAgent, "ua", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15", "User Agent")
+	whatsappCmd.Flags().IntVar(&viewportWidth, "width", 1280, "Viewport Width")
+	whatsappCmd.Flags().IntVar(&viewportHeight, "height", 720, "Viewport Height")
+	whatsappCmd.Flags().Float64Var(&pixelRatio, "pixel-ratio", 1.0, "Pixel Ratio")
 
 	var botCmd = &cobra.Command{
 		Use:   "bot [session_id]",
 		Short: "Start a sample auto-reply bot",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			sessionID := "bot-session"
-			if len(args) > 0 {
-				sessionID = args[0]
-			}
+			sessionID := args[0]
 
 			home, _ := os.UserHomeDir()
 			dbPath := filepath.Join(home, ".trakand_reach", "reach.db")
@@ -191,10 +193,10 @@ WantedBy=multi-user.target
 			session := &models.Session{
 				ID: sessionID,
 				DeviceInfo: models.DeviceInfo{
-					UserAgent:  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-					Width:      1280,
-					Height:     720,
-					PixelRatio: 1.0,
+					UserAgent:  userAgent,
+					Width:      viewportWidth,
+					Height:     viewportHeight,
+					PixelRatio: pixelRatio,
 				},
 				LastURL: "https://web.whatsapp.com",
 			}
@@ -220,6 +222,10 @@ WantedBy=multi-user.target
 			log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), server))
 		},
 	}
+	botCmd.Flags().StringVar(&userAgent, "ua", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15", "User Agent")
+	botCmd.Flags().IntVar(&viewportWidth, "width", 1280, "Viewport Width")
+	botCmd.Flags().IntVar(&viewportHeight, "height", 720, "Viewport Height")
+	botCmd.Flags().Float64Var(&pixelRatio, "pixel-ratio", 1.0, "Pixel Ratio")
 
 	rootCmd.AddCommand(runCmd, installCmd, setupCmd, uninstallCmd, whatsappCmd, botCmd)
 	rootCmd.Execute()

@@ -27,8 +27,9 @@ func main() {
 	manager.Start()
 
 	// Start a session
+    mySessionID := "your-unique-session-id"
 	session := &models.Session{
-		ID: "my-account",
+		ID: mySessionID,
 		DeviceInfo: models.DeviceInfo{
 			UserAgent: "Mozilla/5.0...",
 			Width: 1280,
@@ -54,7 +55,7 @@ func main() {
 	}()
 
 	// Send a message
-	manager.SendMessage("my-account", "1234567890", "Hello from Go!")
+	manager.SendMessage(mySessionID, "1234567890", "Hello from Go!")
 }
 ```
 
