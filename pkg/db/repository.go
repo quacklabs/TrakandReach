@@ -127,6 +127,21 @@ func (r *Repository) SaveSession(s *models.Session) error {
 	return tx.Commit()
 }
 
+func (r *Repository) parseTime(val string) time.Time {
+	formats := []string{
+		"2006-01-02 15:04:05",
+		time.RFC3339,
+		"2006-01-02T15:04:05Z07:00",
+	}
+	for _, f := range formats {
+		t, err := time.Parse(f, val)
+		if err == nil {
+			return t
+		}
+	}
+	return time.Now()
+}
+
 func (r *Repository) GetSessions() ([]*models.Session, error) {
 	rows, err := r.db.Query(`
 		SELECT s.id, s.created_at, s.browser_type, s.access_key, s.last_url, s.webhook_url, s.connection_state, s.owner_jid, s.profile_name, s.profile_picture_url,
@@ -151,16 +166,37 @@ func (r *Repository) GetSessions() ([]*models.Session, error) {
 		if err != nil {
 			return nil, err
 		}
-		// SQLite might return different time formats; simple parse for now
-		s.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
-		if s.CreatedAt.IsZero() {
-			s.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-		}
+		s.CreatedAt = r.parseTime(createdAt)
 		d.Fingerprint = s.ID
 		s.DeviceInfo = d
 		sessions = append(sessions, s)
 	}
 	return sessions, nil
+}
+
+func (r *Repository) GetSession(id string) (*models.Session, error) {
+	row := r.db.QueryRow(`
+		SELECT s.id, s.created_at, s.browser_type, s.access_key, s.last_url, s.webhook_url, s.connection_state, s.owner_jid, s.profile_name, s.profile_picture_url,
+		       d.os, d.user_agent, d.browser, d.product, d.manufacturer, d.engine, d.width, d.height, d.pixel_ratio, d.dark_mode, d.language, d.device_type, d.device_model, d.device_brand, d.device_os
+		FROM sessions s
+		JOIN device_info d ON s.id = d.session_id
+		WHERE s.id = ?
+	`, id)
+
+	s := &models.Session{}
+	d := models.DeviceInfo{}
+	var createdAt string
+	err := row.Scan(
+		&s.ID, &createdAt, &s.BrowserType, &s.AccessKey, &s.LastURL, &s.WebhookURL, &s.ConnectionState, &s.OwnerJID, &s.ProfileName, &s.ProfilePictureURL,
+		&d.OS, &d.UserAgent, &d.Browser, &d.Product, &d.Manufacturer, &d.Engine, &d.Width, &d.Height, &d.PixelRatio, &d.DarkMode, &d.Language, &d.Device.Type, &d.Device.Model, &d.Device.Brand, &d.Device.OS,
+	)
+	if err != nil {
+		return nil, err
+	}
+	s.CreatedAt = r.parseTime(createdAt)
+	d.Fingerprint = s.ID
+	s.DeviceInfo = d
+	return s, nil
 }
 
 func (r *Repository) Close() error {
@@ -184,14 +220,16 @@ func (r *Repository) ImportFromJSON(jsonPath string) error {
 	}
 
 	for id, val := range legacySessions {
-		sdata := val.(map[string]interface{})
-		dData := sdata["device_info"].(map[string]interface{})
-		dtData := dData["device"].(map[string]interface{})
+		sdata, ok := val.(map[string]interface{})
+		if !ok { continue }
+
+		dData, _ := sdata["device_info"].(map[string]interface{})
+		dtData, _ := dData["device"].(map[string]interface{})
 
 		s := &models.Session{
 			ID:                id,
-			BrowserType:       sdata["browser_type"].(string),
-			AccessKey:         sdata["access_key"].(string),
+			BrowserType:       fmt.Sprintf("%v", sdata["browser_type"]),
+			AccessKey:         fmt.Sprintf("%v", sdata["access_key"]),
 			LastURL:           fmt.Sprintf("%v", sdata["last_url"]),
 			ConnectionState:   fmt.Sprintf("%v", sdata["connection_state"]),
 			CreatedAt:         time.Now(), // approximate
