@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/playwright-community/playwright-go"
 	"github.com/username/trakand-reach/pkg/bridge"
@@ -27,22 +28,35 @@ type SessionInstance struct {
 	IsAlive     bool
 	Events      chan Event
 	StopCapture context.CancelFunc
+	Mu          sync.Mutex
+	HasClient   bool
 }
 
 type Manager struct {
-	pw       *playwright.Playwright
-	browser  playwright.Browser
-	sessions sync.Map // string -> *SessionInstance
-	repo     *db.Repository
-	baseDir  string
-	mu       sync.Mutex
-	isStarted bool
+	pw             *playwright.Playwright
+	browser        playwright.Browser
+	sessions       sync.Map // string -> *SessionInstance
+	repo           *db.Repository
+	baseDir        string
+	mu             sync.Mutex
+	isStarted      bool
 	warmedBrowsers map[string]bool
 }
 
 func NewManager(repo *db.Repository) (*Manager, error) {
 	home, _ := os.UserHomeDir()
 	baseDir := filepath.Join(home, ".trakand_reach")
+	os.MkdirAll(filepath.Join(baseDir, "browserSessions"), 0755)
+
+	return &Manager{
+		repo:           repo,
+		baseDir:        baseDir,
+		warmedBrowsers: make(map[string]bool),
+	}, nil
+}
+
+// NewManagerWithDir allows specifying a custom base directory (useful for tests and flexibility)
+func NewManagerWithDir(repo *db.Repository, baseDir string) (*Manager, error) {
 	os.MkdirAll(filepath.Join(baseDir, "browserSessions"), 0755)
 
 	return &Manager{
@@ -132,10 +146,27 @@ func (m *Manager) resumeSessions() {
 		return
 	}
 
-	for _, s := range sessions {
-		if s.LastURL != "" {
-			log.Printf("Auto-resuming session: %s", s.ID)
-			go m.StartSession(s)
+	// Throttled resume: 2 sessions every 5 seconds to avoid CPU/RAM spikes
+	throttle := time.NewTicker(5 * time.Second)
+	defer throttle.Stop()
+
+	batchSize := 2
+	for i := 0; i < len(sessions); i += batchSize {
+		end := i + batchSize
+		if end > len(sessions) {
+			end = len(sessions)
+		}
+
+		batch := sessions[i:end]
+		for _, s := range batch {
+			if s.LastURL != "" {
+				log.Printf("Auto-resuming session: %s", s.ID)
+				go m.StartSession(s)
+			}
+		}
+
+		if end < len(sessions) {
+			<-throttle.C
 		}
 	}
 }
@@ -149,7 +180,7 @@ func (m *Manager) StartSession(s *models.Session) (*SessionInstance, error) {
 	os.MkdirAll(userDataDir, 0755)
 
 	options := playwright.BrowserTypeLaunchPersistentContextOptions{
-		Headless: playwright.Bool(true),
+		Headless:  playwright.Bool(true),
 		UserAgent: playwright.String(s.DeviceInfo.UserAgent),
 		Viewport: &playwright.Size{
 			Width:  s.DeviceInfo.Width,
@@ -219,6 +250,13 @@ func (m *Manager) StartSession(s *models.Session) (*SessionInstance, error) {
 		if err != nil {
 			log.Printf("Failed to navigate to last URL: %v", err)
 		}
+	} else {
+		_, err = page.Goto("https://web.whatsapp.com", playwright.PageGotoOptions{
+			WaitUntil: playwright.WaitUntilStateDomcontentloaded,
+		})
+		if err != nil {
+			log.Printf("Failed to navigate to WhatsApp: %v", err)
+		}
 	}
 
 	m.sessions.Store(s.ID, inst)
@@ -231,21 +269,27 @@ func (m *Manager) updateSessionState(id string, data interface{}) {
 		return
 	}
 
-	sessions, _ := m.repo.GetSessions()
-	for _, s := range sessions {
-		if s.ID == id {
-			if state, ok := d["state"].(string); ok {
-				s.ConnectionState = state
-			}
-			if jid, ok := d["owner_jid"].(string); ok {
-				s.OwnerJID = jid
-			}
-			if name, ok := d["profile_name"].(string); ok {
-				s.ProfileName = name
-			}
-			m.repo.SaveSession(s)
-			break
-		}
+	s, err := m.repo.GetSession(id)
+	if err != nil {
+		return
+	}
+
+	changed := false
+	if state, ok := d["state"].(string); ok && s.ConnectionState != state {
+		s.ConnectionState = state
+		changed = true
+	}
+	if jid, ok := d["owner_jid"].(string); ok && s.OwnerJID != jid {
+		s.OwnerJID = jid
+		changed = true
+	}
+	if name, ok := d["profile_name"].(string); ok && s.ProfileName != name {
+		s.ProfileName = name
+		changed = true
+	}
+
+	if changed {
+		m.repo.SaveSession(s)
 	}
 }
 
@@ -256,7 +300,7 @@ func (m *Manager) SendMessage(sessionID, to, text string) error {
 	}
 	inst := val.(*SessionInstance)
 
-	// Try Internal Store first
+	// Try Internal Store first (Evolution API style)
 	result, err := inst.Page.Evaluate(`async (to, text) => {
 		if (window.trakand_bridge && window.trakand_bridge.sendMessage) {
 			return await window.trakand_bridge.sendMessage(to, text);
@@ -269,9 +313,10 @@ func (m *Manager) SendMessage(sessionID, to, text string) error {
 		if success, _ := res["success"].(bool); success {
 			return nil
 		}
+		log.Printf("Bridge send failed for %s: %v", to, res["error"])
 	}
 
-	// Fallback: URL Navigation (Precision)
+	// Fallback: URL Navigation (Precision) - only if bridge failed and it's a numeric number
 	isNumeric := true
 	for _, c := range to {
 		if c < '0' || c > '9' {
@@ -281,6 +326,7 @@ func (m *Manager) SendMessage(sessionID, to, text string) error {
 	}
 
 	if isNumeric && len(to) >= 10 {
+		log.Printf("Falling back to UI send for %s", to)
 		url := fmt.Sprintf("https://web.whatsapp.com/send?phone=%s", to)
 		_, err = inst.Page.Goto(url, playwright.PageGotoOptions{
 			WaitUntil: playwright.WaitUntilStateDomcontentloaded,
@@ -297,7 +343,7 @@ func (m *Manager) SendMessage(sessionID, to, text string) error {
 		return err
 	}
 
-	return fmt.Errorf("could not send message: %v", err)
+	return fmt.Errorf("could not send message to %s (bridge failed and no UI fallback available)", to)
 }
 
 func (m *Manager) Stop() {
@@ -310,4 +356,16 @@ func (m *Manager) Stop() {
 	if m.pw != nil {
 		m.pw.Stop()
 	}
+}
+
+func (m *Manager) GetSessions() ([]*models.Session, error) {
+	return m.repo.GetSessions()
+}
+
+func (m *Manager) GetSession(id string) (*SessionInstance, bool) {
+	val, ok := m.sessions.Load(id)
+	if !ok {
+		return nil, false
+	}
+	return val.(*SessionInstance), true
 }

@@ -7,6 +7,7 @@ const JSBridge = `
         Store: null,
         lastQR: null,
         lastState: null,
+        isReady: false,
 
         init() {
             console.log("Trakand Reach Bridge: Initializing...");
@@ -16,8 +17,27 @@ const JSBridge = `
         },
 
         hookInternalStore() {
+            let attempts = 0;
             const interval = setInterval(() => {
+                attempts++;
                 try {
+                    // Try multiple detection methods
+                    if (window.require) {
+                        try {
+                            const modules = ["WAWebStore", "WAWebChat", "WAWebMsg", "WAWebConn"];
+                            let found = {};
+                            for (const m of modules) {
+                                try { found[m] = window.require(m); } catch(e) {}
+                            }
+                            if (found.WAWebStore || (found.WAWebChat && found.WAWebMsg)) {
+                                this.Store = found.WAWebStore || { Chat: found.WAWebChat, Msg: found.WAWebMsg, Conn: found.WAWebConn };
+                                this.finalizeStore();
+                                clearInterval(interval);
+                                return;
+                            }
+                        } catch(e) {}
+                    }
+
                     if (window.mR && window.mR.modules) {
                         const modules = window.mR.modules;
                         const store = Object.values(modules).find(m =>
@@ -25,23 +45,41 @@ const JSBridge = `
                         );
                         if (store) {
                             this.Store = store.exports.default;
-                            window.WWebStore = this.Store;
-                            this.bindEvents();
+                            this.finalizeStore();
                             clearInterval(interval);
+                            return;
                         }
                     }
-                } catch (e) {}
+
+                    // Backup: brute force search in webpack modules if available
+                    if (window.webpackChunkwhatsapp_web_client) {
+                        // This is more complex, but a common fallback
+                    }
+
+                } catch (e) {
+                    if (attempts > 100) clearInterval(interval);
+                }
             }, 500);
+        },
+
+        finalizeStore() {
+            window.WWebStore = this.Store;
+            this.bindEvents();
+            this.isReady = true;
+            console.log("Trakand Bridge: Internal Store Hooked ✅");
         },
 
         bindEvents() {
             if (!this.Store || !this.Store.Msg) return;
-            this.Store.Msg.on('add', (msg) => {
-                if (msg.isNewMsg && !this.lastProcessed.has(msg.id._serialized)) {
-                    this.processIncoming(msg);
-                }
-            });
-            console.log("Trakand Bridge: Deep Store Hooking Active ✅");
+
+            // Evolution-style: listen for multiple events
+            if (this.Store.Msg.on) {
+                this.Store.Msg.on('add', (msg) => {
+                    if (msg.isNewMsg && !this.lastProcessed.has(msg.id._serialized)) {
+                        this.processIncoming(msg);
+                    }
+                });
+            }
         },
 
         processIncoming(msg) {
@@ -50,34 +88,54 @@ const JSBridge = `
                 body: msg.body || msg.caption || "",
                 type: msg.type,
                 t: msg.t,
-                from: msg.from._serialized,
-                to: msg.to._serialized,
+                from: msg.from._serialized || msg.from,
+                to: msg.to._serialized || msg.to,
                 self: msg.id.fromMe ? "out" : "in",
                 isGroup: msg.isGroupMsg,
-                pushname: msg.sender?.pushname || ""
+                pushname: msg.sender?.pushname || msg.pushname || ""
             };
             this.lastProcessed.add(data.id);
             if (window.trakand_emit) {
                 window.trakand_emit('message_new', data);
             }
 
-            if (this.lastProcessed.size > 1000) {
+            if (this.lastProcessed.size > 2000) {
                 const arr = Array.from(this.lastProcessed);
-                this.lastProcessed = new Set(arr.slice(500));
+                this.lastProcessed = new Set(arr.slice(1000));
             }
         },
 
         async sendMessage(to, text) {
             try {
-                if (!this.Store || !this.Store.Chat) throw new Error("Store not ready");
+                if (!this.Store) throw new Error("Store not ready");
+
                 const jid = to.includes('@') ? to : to + '@c.us';
-                let chat = this.Store.Chat.get(jid);
-                if (!chat) {
+
+                // Advanced sending logic (Evolution style)
+                let chat;
+                if (this.Store.Chat.get) {
+                    chat = this.Store.Chat.get(jid);
+                }
+
+                if (!chat && this.Store.Chat.find) {
                     chat = await this.Store.Chat.find(jid);
                 }
-                await this.Store.SendTextMsgToChat(chat, text);
+
+                if (!chat) throw new Error("Chat not found and could not be created");
+
+                // Try multiple sending methods for resilience
+                if (this.Store.SendTextMsgToChat) {
+                    await this.Store.SendTextMsgToChat(chat, text);
+                } else if (chat.sendMessage) {
+                    await chat.sendMessage(text);
+                } else if (this.Store.Msg.sendMessage) {
+                    // Create a dummy message object if needed or use internal msg utils
+                    throw new Error("Generic send method not found");
+                }
+
                 return { success: true, jid: jid };
             } catch (e) {
+                console.error("Bridge Send Error:", e);
                 return { success: false, error: e.toString() };
             }
         },
@@ -94,6 +152,7 @@ const JSBridge = `
         },
 
         handleNewNode(node) {
+            // Simplified UI interception as backup to Store hooks
             const selectors = ['.message-in', '[data-id]', '[data-testid="msg-container"]'];
             const isMsg = selectors.some(s => node.matches && (node.matches(s) || node.querySelector(s)));
             if (!isMsg) return;
@@ -105,14 +164,10 @@ const JSBridge = `
                 if (!textNode || !msgId || this.lastMsgId === msgId) return;
                 this.lastMsgId = msgId;
 
-                const jidMatch = msgId.match(/_([0-9]+)@/);
-                const sender_id = jidMatch ? jidMatch[1] : 'unknown';
-
                 if (window.trakand_emit) {
                     window.trakand_emit('message_new_ui', {
                         text: textNode.innerText,
                         msgId: msgId,
-                        sender_id: sender_id,
                         timestamp: Date.now()
                     });
                 }
@@ -143,7 +198,7 @@ const JSBridge = `
                         if (window.trakand_emit) window.trakand_emit('connection_update', profile);
                     }
                 } catch (e) {}
-            }, 1500);
+            }, 2000);
         }
     };
 

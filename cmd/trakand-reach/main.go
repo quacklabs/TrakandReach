@@ -17,13 +17,18 @@ import (
 )
 
 var port int
+var userAgent string
+var viewportWidth int
+var viewportHeight int
+var pixelRatio float64
 
 func main() {
 	var rootCmd = &cobra.Command{Use: "trakand-reach"}
+	rootCmd.PersistentFlags().IntVarP(&port, "port", "p", 3000, "Port to run on")
 
 	var runCmd = &cobra.Command{
 		Use:   "run",
-		Short: "Start the Trakand Reach engine",
+		Short: "Start the Trakand Reach engine service",
 		Run: func(cmd *cobra.Command, args []string) {
 			home, _ := os.UserHomeDir()
 			dbPath := filepath.Join(home, ".trakand_reach", "reach.db")
@@ -46,7 +51,6 @@ func main() {
 			log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), server))
 		},
 	}
-	runCmd.Flags().IntVarP(&port, "port", "p", 3000, "Port to run on")
 
 	var installCmd = &cobra.Command{
 		Use:   "install",
@@ -136,9 +140,12 @@ WantedBy=multi-user.target
 	}
 
 	var whatsappCmd = &cobra.Command{
-		Use:   "whatsapp",
-		Short: "Quick start WhatsApp Web session",
+		Use:   "whatsapp [session_id]",
+		Short: "Quick start a WhatsApp Web session",
+		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
+			sessionID := args[0]
+
 			home, _ := os.UserHomeDir()
 			dbPath := filepath.Join(home, ".trakand_reach", "reach.db")
 			repo, _ := db.NewRepository(dbPath)
@@ -147,28 +154,35 @@ WantedBy=multi-user.target
 			defer manager.Stop()
 
 			session := &models.Session{
-				ID: "whatsapp-default",
+				ID: sessionID,
 				DeviceInfo: models.DeviceInfo{
-					UserAgent:  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-					Width:      1280,
-					Height:     720,
-					PixelRatio: 1.0,
+					UserAgent:  userAgent,
+					Width:      viewportWidth,
+					Height:     viewportHeight,
+					PixelRatio: pixelRatio,
 				},
 				LastURL: "https://web.whatsapp.com",
 			}
 
 			_, _ = manager.StartSession(session)
-			fmt.Printf("WhatsApp session started. WebSocket available on port %d\n", port)
+			fmt.Printf("WhatsApp session [%s] started. WebSocket available on port %d\n", sessionID, port)
 
 			server := api.NewServer(manager)
 			log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), server))
 		},
 	}
+	whatsappCmd.Flags().StringVar(&userAgent, "ua", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15", "User Agent")
+	whatsappCmd.Flags().IntVar(&viewportWidth, "width", 1280, "Viewport Width")
+	whatsappCmd.Flags().IntVar(&viewportHeight, "height", 720, "Viewport Height")
+	whatsappCmd.Flags().Float64Var(&pixelRatio, "pixel-ratio", 1.0, "Pixel Ratio")
 
 	var botCmd = &cobra.Command{
-		Use:   "bot",
+		Use:   "bot [session_id]",
 		Short: "Start a sample auto-reply bot",
+		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
+			sessionID := args[0]
+
 			home, _ := os.UserHomeDir()
 			dbPath := filepath.Join(home, ".trakand_reach", "reach.db")
 			repo, _ := db.NewRepository(dbPath)
@@ -177,12 +191,12 @@ WantedBy=multi-user.target
 			defer manager.Stop()
 
 			session := &models.Session{
-				ID: "bot-session",
+				ID: sessionID,
 				DeviceInfo: models.DeviceInfo{
-					UserAgent:  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-					Width:      1280,
-					Height:     720,
-					PixelRatio: 1.0,
+					UserAgent:  userAgent,
+					Width:      viewportWidth,
+					Height:     viewportHeight,
+					PixelRatio: pixelRatio,
 				},
 				LastURL: "https://web.whatsapp.com",
 			}
@@ -193,9 +207,9 @@ WantedBy=multi-user.target
 				for ev := range inst.Events {
 					if ev.Type == "message_new" {
 						data := ev.Data.(map[string]interface{})
-						body := data["body"].(string)
-						from := data["from"].(string)
-						fmt.Printf("New message from %s: %s\n", from, body)
+						body, _ := data["body"].(string)
+						from, _ := data["from"].(string)
+						fmt.Printf("[%s] New message from %s: %s\n", sessionID, from, body)
 						if body == "hello" {
 							manager.SendMessage(session.ID, from, "Hello! I am a Trakand Reach Go Bot.")
 						}
@@ -203,12 +217,15 @@ WantedBy=multi-user.target
 				}
 			}()
 
+			fmt.Printf("Bot session [%s] started. Listening for 'hello'...\n", sessionID)
 			server := api.NewServer(manager)
 			log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), server))
 		},
 	}
-
-	setupCmd.Flags().IntVarP(&port, "port", "p", 3000, "Port to run on")
+	botCmd.Flags().StringVar(&userAgent, "ua", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15", "User Agent")
+	botCmd.Flags().IntVar(&viewportWidth, "width", 1280, "Viewport Width")
+	botCmd.Flags().IntVar(&viewportHeight, "height", 720, "Viewport Height")
+	botCmd.Flags().Float64Var(&pixelRatio, "pixel-ratio", 1.0, "Pixel Ratio")
 
 	rootCmd.AddCommand(runCmd, installCmd, setupCmd, uninstallCmd, whatsappCmd, botCmd)
 	rootCmd.Execute()

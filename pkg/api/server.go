@@ -51,7 +51,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
-	// Implementation deferred to manager/repo lookup
+	sessions, err := s.manager.GetSessions()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(sessions)
 }
 
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
@@ -107,6 +113,25 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enforce One Client Per Session
+	inst.Mu.Lock()
+	if inst.HasClient {
+		inst.Mu.Unlock()
+		conn.WriteJSON(map[string]interface{}{
+			"type": "error",
+			"message": "Another client is already connected to this session",
+		})
+		return
+	}
+	inst.HasClient = true
+	inst.Mu.Unlock()
+
+	defer func() {
+		inst.Mu.Lock()
+		inst.HasClient = false
+		inst.Mu.Unlock()
+	}()
+
 	// Forward Events & Stream Screenshots
 	stop := make(chan bool)
 	go s.streamScreenshots(conn, inst, stop)
@@ -114,11 +139,15 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case ev := <-inst.Events:
-			conn.WriteJSON(map[string]interface{}{
+			err := conn.WriteJSON(map[string]interface{}{
 				"type": "event",
 				"name": ev.Type,
 				"data": ev.Data,
 			})
+			if err != nil {
+				close(stop)
+				return
+			}
 			// Forward to Webhook if configured
 			if inst.Model.WebhookURL != "" {
 				go s.forwardWebhook(inst.Model.WebhookURL, ev)
