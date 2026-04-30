@@ -39,7 +39,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/reach/health", s.handleHealth)
-	s.mux.HandleFunc("/reach/sessions", s.handleListSessions)
+	s.mux.HandleFunc("/reach/sessions", s.handleSessions)
+	s.mux.HandleFunc("/reach/sessions/", s.handleSessionDetail)
 	s.mux.HandleFunc("/reach/send", s.handleSendMessage)
 	s.mux.HandleFunc("/ws", s.handleWebSocket)
 }
@@ -50,8 +51,44 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(health)
 }
 
-func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
-	// Implementation deferred to manager/repo lookup
+func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	sessions := s.manager.GetSessionsStatus()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(sessions)
+}
+
+func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
+	// Path is /reach/sessions/{id} or /reach/sessions/{id}/qr
+	path := r.URL.Path
+	parts := bytes.Split([]byte(path), []byte("/"))
+	if len(parts) < 4 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	sessionID := string(parts[3])
+	status, err := s.manager.GetSessionStatus(sessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	if len(parts) == 5 && string(parts[4]) == "qr" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"session_id": sessionID,
+			"qr":         status["qr"],
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(status)
 }
 
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
@@ -119,10 +156,6 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				"name": ev.Type,
 				"data": ev.Data,
 			})
-			// Forward to Webhook if configured
-			if inst.Model.WebhookURL != "" {
-				go s.forwardWebhook(inst.Model.WebhookURL, ev)
-			}
 		}
 	}
 }
@@ -163,20 +196,3 @@ func (s *Server) streamScreenshots(conn *websocket.Conn, inst *engine.SessionIns
 	}
 }
 
-func (s *Server) forwardWebhook(url string, ev engine.Event) {
-	payload, _ := json.Marshal(map[string]interface{}{
-		"account": ev.SessionID,
-		"event":   ev.Type,
-		"data":    ev.Data,
-	})
-
-	// Simple retry logic
-	for i := 0; i < 3; i++ {
-		resp, err := http.Post(url, "application/json", bytes.NewBuffer(payload))
-		if err == nil && resp.StatusCode < 300 {
-			resp.Body.Close()
-			return
-		}
-		time.Sleep(time.Duration(i+1) * time.Second)
-	}
-}

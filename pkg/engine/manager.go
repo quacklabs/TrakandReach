@@ -1,12 +1,19 @@
 package engine
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/playwright-community/playwright-go"
 	"github.com/username/trakand-reach/pkg/bridge"
@@ -27,17 +34,21 @@ type SessionInstance struct {
 	IsAlive     bool
 	Events      chan Event
 	StopCapture context.CancelFunc
+	Ready       bool
+	LastQR      string
 }
 
 type Manager struct {
-	pw       *playwright.Playwright
-	browser  playwright.Browser
-	sessions sync.Map // string -> *SessionInstance
-	repo     *db.Repository
-	baseDir  string
-	mu       sync.Mutex
-	isStarted bool
-	warmedBrowsers map[string]bool
+	pw               *playwright.Playwright
+	browser          playwright.Browser
+	sessions         sync.Map // string -> *SessionInstance
+	repo             *db.Repository
+	baseDir          string
+	mu               sync.Mutex
+	isStarted        bool
+	warmedBrowsers   map[string]bool
+	GlobalWebhookURL string
+	WebhookSecret    string
 }
 
 func NewManager(repo *db.Repository) (*Manager, error) {
@@ -50,6 +61,13 @@ func NewManager(repo *db.Repository) (*Manager, error) {
 		baseDir:        baseDir,
 		warmedBrowsers: make(map[string]bool),
 	}, nil
+}
+
+func (m *Manager) SetWebhookConfig(url, secret string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.GlobalWebhookURL = url
+	m.WebhookSecret = secret
 }
 
 func (m *Manager) Start() error {
@@ -108,8 +126,13 @@ func (m *Manager) WarmBrowser(browserType string) {
 
 func (m *Manager) GetHealth() map[string]interface{} {
 	activeCount := 0
-	m.sessions.Range(func(_, _ interface{}) bool {
+	allReady := true
+	m.sessions.Range(func(_, value interface{}) bool {
 		activeCount++
+		inst := value.(*SessionInstance)
+		if !inst.Ready {
+			allReady = false
+		}
 		return true
 	})
 
@@ -121,8 +144,41 @@ func (m *Manager) GetHealth() map[string]interface{} {
 		"engine_running":  m.isStarted,
 		"sessions_active": activeCount,
 		"webkit_warmed":   warmed,
+		"loop_ready":      allReady && m.isStarted,
 		"db_status":       "connected",
 	}
+}
+
+func (m *Manager) GetSessionsStatus() []map[string]interface{} {
+	var results []map[string]interface{}
+	m.sessions.Range(func(key, value interface{}) bool {
+		id := key.(string)
+		inst := value.(*SessionInstance)
+		results = append(results, map[string]interface{}{
+			"id":               id,
+			"ready":            inst.Ready,
+			"connection_state": inst.Model.ConnectionState,
+			"owner_jid":        inst.Model.OwnerJID,
+		})
+		return true
+	})
+	return results
+}
+
+func (m *Manager) GetSessionStatus(id string) (map[string]interface{}, error) {
+	val, ok := m.sessions.Load(id)
+	if !ok {
+		return nil, fmt.Errorf("session %s not found", id)
+	}
+	inst := val.(*SessionInstance)
+	return map[string]interface{}{
+		"id":               id,
+		"ready":            inst.Ready,
+		"qr":               inst.LastQR,
+		"connection_state": inst.Model.ConnectionState,
+		"owner_jid":        inst.Model.OwnerJID,
+		"profile_name":     inst.Model.ProfileName,
+	}, nil
 }
 
 func (m *Manager) resumeSessions() {
@@ -180,6 +236,7 @@ func (m *Manager) StartSession(s *models.Session) (*SessionInstance, error) {
 		Page:    page,
 		IsAlive: true,
 		Events:  make(chan Event, 100),
+		Ready:   false,
 	}
 
 	// Expose Function for Bridge
@@ -189,11 +246,39 @@ func (m *Manager) StartSession(s *models.Session) (*SessionInstance, error) {
 		}
 		name, _ := args[0].(string)
 		data := args[1]
-		inst.Events <- Event{
+
+		// Inject session_id if data is a map
+		if mData, ok := data.(map[string]interface{}); ok {
+			mData["session_id"] = s.ID
+		}
+
+		// Capture QR
+		if name == "qr" {
+			if qr, ok := data.(string); ok {
+				inst.LastQR = qr
+			}
+		}
+
+		ev := Event{
 			SessionID: s.ID,
 			Type:      name,
 			Data:      data,
 		}
+
+		inst.Events <- ev
+
+		// Integrated Webhook Dispatch
+		webhookURL := s.WebhookURL
+		if webhookURL == "" {
+			m.mu.Lock()
+			webhookURL = m.GlobalWebhookURL
+			m.mu.Unlock()
+		}
+
+		if webhookURL != "" {
+			go m.dispatchWebhook(webhookURL, ev)
+		}
+
 		// Update DB on state changes
 		if name == "connection_update" {
 			m.updateSessionState(s.ID, data)
@@ -221,6 +306,7 @@ func (m *Manager) StartSession(s *models.Session) (*SessionInstance, error) {
 		}
 	}
 
+	inst.Ready = true
 	m.sessions.Store(s.ID, inst)
 	return inst, nil
 }
@@ -298,6 +384,56 @@ func (m *Manager) SendMessage(sessionID, to, text string) error {
 	}
 
 	return fmt.Errorf("could not send message: %v", err)
+}
+
+func (m *Manager) dispatchWebhook(url string, ev Event) {
+	payload := map[string]interface{}{
+		"account": ev.SessionID,
+		"event":   ev.Type,
+		"data":    ev.Data,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("Webhook marshal error: %v", err)
+		return
+	}
+
+	// Simple retry logic
+	for i := 0; i < 3; i++ {
+		req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
+		if err != nil {
+			log.Printf("Webhook request creation error: %v", err)
+			return
+		}
+
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", "TrakandReach-Go/1.0")
+
+		m.mu.Lock()
+		secret := m.WebhookSecret
+		m.mu.Unlock()
+
+		if secret != "" {
+			h := hmac.New(sha256.New, []byte(secret))
+			h.Write(body)
+			signature := hex.EncodeToString(h.Sum(nil))
+			req.Header.Set("X-Trakand-Signature", signature)
+		}
+
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err == nil && resp.StatusCode < 300 {
+			resp.Body.Close()
+			return
+		}
+
+		if err == nil {
+			resp.Body.Close()
+		}
+
+		time.Sleep(time.Duration(i+1) * time.Second)
+	}
 }
 
 func (m *Manager) Stop() {

@@ -17,6 +17,8 @@ import (
 )
 
 var port int
+var webhookURL string
+var webhookSecret string
 
 func main() {
 	var rootCmd = &cobra.Command{Use: "trakand-reach"}
@@ -37,6 +39,16 @@ func main() {
 				log.Fatalf("Engine Error: %v", err)
 			}
 
+			// Env vars take precedence if not set via flags
+			if webhookURL == "" {
+				webhookURL = os.Getenv("TRAK_WEBHOOK_URL")
+			}
+			if webhookSecret == "" {
+				webhookSecret = os.Getenv("TRAK_WEBHOOK_SECRET")
+			}
+
+			manager.SetWebhookConfig(webhookURL, webhookSecret)
+
 			if err := manager.Start(); err != nil {
 				log.Fatalf("Failed to start manager: %v", err)
 			}
@@ -47,6 +59,8 @@ func main() {
 		},
 	}
 	runCmd.Flags().IntVarP(&port, "port", "p", 3000, "Port to run on")
+	runCmd.Flags().StringVar(&webhookURL, "webhook-url", "", "Global webhook URL")
+	runCmd.Flags().StringVar(&webhookSecret, "webhook-secret", "", "Global webhook secret")
 
 	var installCmd = &cobra.Command{
 		Use:   "install",
@@ -77,6 +91,19 @@ func main() {
 			cwd, _ := os.Getwd()
 			execPath, _ := filepath.Abs(os.Args[0])
 
+			envVars := ""
+			if webhookURL != "" {
+				envVars += fmt.Sprintf("Environment=TRAK_WEBHOOK_URL=%s\n", webhookURL)
+			} else if os.Getenv("TRAK_WEBHOOK_URL") != "" {
+				envVars += fmt.Sprintf("Environment=TRAK_WEBHOOK_URL=%s\n", os.Getenv("TRAK_WEBHOOK_URL"))
+			}
+
+			if webhookSecret != "" {
+				envVars += fmt.Sprintf("Environment=TRAK_WEBHOOK_SECRET=%s\n", webhookSecret)
+			} else if os.Getenv("TRAK_WEBHOOK_SECRET") != "" {
+				envVars += fmt.Sprintf("Environment=TRAK_WEBHOOK_SECRET=%s\n", os.Getenv("TRAK_WEBHOOK_SECRET"))
+			}
+
 			serviceContent := fmt.Sprintf(`[Unit]
 Description=Trakand Reach Go Engine
 After=network.target
@@ -85,13 +112,13 @@ After=network.target
 Type=simple
 User=%s
 WorkingDirectory=%s
-ExecStart=%s run --port %d
+%sExecStart=%s run --port %d
 Restart=always
 RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
-`, user, cwd, execPath, port)
+`, user, cwd, envVars, execPath, port)
 
 			servicePath := "/etc/systemd/system/trakand-reach.service"
 			fmt.Printf("Installing systemd service to %s...\n", servicePath)
@@ -209,6 +236,8 @@ WantedBy=multi-user.target
 	}
 
 	setupCmd.Flags().IntVarP(&port, "port", "p", 3000, "Port to run on")
+	setupCmd.Flags().StringVar(&webhookURL, "webhook-url", "", "Global webhook URL for systemd")
+	setupCmd.Flags().StringVar(&webhookSecret, "webhook-secret", "", "Global webhook secret for systemd")
 
 	rootCmd.AddCommand(runCmd, installCmd, setupCmd, uninstallCmd, whatsappCmd, botCmd)
 	rootCmd.Execute()
