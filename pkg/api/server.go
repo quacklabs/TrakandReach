@@ -48,21 +48,69 @@ func (s *Server) routes() {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	health := s.manager.GetHealth()
 	w.Header().Set("Content-Type", "application/json")
+	// If the manager is not yet fully started but the server is up, we should still return 200 with status
+	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(health)
 }
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		sessions := s.manager.GetSessionsStatus()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sessions)
+		return
+	}
+
+	if r.Method == http.MethodPost {
+		var req models.Session
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if req.ID == "" {
+			http.Error(w, "session_id is required", http.StatusBadRequest)
+			return
+		}
+
+		// Default values if not provided
+		if req.DeviceInfo.UserAgent == "" {
+			req.DeviceInfo.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+		}
+		if req.DeviceInfo.Width == 0 {
+			req.DeviceInfo.Width = 1280
+		}
+		if req.DeviceInfo.Height == 0 {
+			req.DeviceInfo.Height = 720
+		}
+		if req.LastURL == "" {
+			req.LastURL = "https://web.whatsapp.com"
+		}
+
+		inst, err := s.manager.StartSession(&req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":     "starting",
+			"session_id": inst.Model.ID,
+		})
+		return
+	}
+
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
+func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	sessions := s.manager.GetSessionsStatus()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(sessions)
-}
-
-func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 	// Path is /reach/sessions/{id} or /reach/sessions/{id}/qr
 	path := r.URL.Path
 	parts := bytes.Split([]byte(path), []byte("/"))
@@ -92,6 +140,11 @@ func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	var req struct {
 		SessionID string `json:"session_id"`
 		To        string `json:"to"`
@@ -102,10 +155,17 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.SessionID == "" || req.To == "" || req.Text == "" {
+		http.Error(w, "session_id, to, and text are required", http.StatusBadRequest)
+		return
+	}
+
 	if err := s.manager.SendMessage(req.SessionID, req.To, req.Text); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "sent"})
 }

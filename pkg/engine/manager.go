@@ -18,6 +18,7 @@ import (
 	"github.com/playwright-community/playwright-go"
 	"github.com/username/trakand-reach/pkg/bridge"
 	"github.com/username/trakand-reach/pkg/db"
+	"github.com/username/trakand-reach/pkg/filter"
 	"github.com/username/trakand-reach/pkg/models"
 )
 
@@ -49,6 +50,7 @@ type Manager struct {
 	warmedBrowsers   map[string]bool
 	GlobalWebhookURL string
 	WebhookSecret    string
+	Filter           *filter.SpamFilter
 }
 
 func NewManager(repo *db.Repository) (*Manager, error) {
@@ -56,10 +58,21 @@ func NewManager(repo *db.Repository) (*Manager, error) {
 	baseDir := filepath.Join(home, ".trakand_reach")
 	os.MkdirAll(filepath.Join(baseDir, "browserSessions"), 0755)
 
+	// Initialize Spam Filter
+	spamFile := "spam.txt"
+	if _, err := os.Stat(spamFile); os.IsNotExist(err) {
+		// Try in the same directory as the executable if not in CWD
+		execPath, err := os.Executable()
+		if err == nil {
+			spamFile = filepath.Join(filepath.Dir(execPath), "spam.txt")
+		}
+	}
+
 	return &Manager{
 		repo:           repo,
 		baseDir:        baseDir,
 		warmedBrowsers: make(map[string]bool),
+		Filter:         filter.NewSpamFilter(spamFile),
 	}, nil
 }
 
@@ -246,6 +259,18 @@ func (m *Manager) StartSession(s *models.Session) (*SessionInstance, error) {
 		}
 		name, _ := args[0].(string)
 		data := args[1]
+
+		// Filter Spam
+		if name == "message_new" {
+			if mData, ok := data.(map[string]interface{}); ok {
+				from, _ := mData["from"].(string)
+				body, _ := mData["body"].(string)
+				if m.Filter != nil && m.Filter.IsSpam(from, body) {
+					log.Printf("[Session: %s] Discarding spam message from %s", s.ID, from)
+					return nil
+				}
+			}
+		}
 
 		// Inject session_id if data is a map
 		if mData, ok := data.(map[string]interface{}); ok {

@@ -6,6 +6,7 @@ A high-performance, Evolution-grade Playwright orchestration engine written in G
 - **Evolution-API Grade**: Deep interception of WhatsApp messages via internal Store hooks.
 - **Microservice Ready**: Built-in webhook dispatcher with retry logic.
 - **Optimized Streaming**: Real-time WebP screenshot streaming via Binary WebSockets.
+- **Spam Filtering**: Integrated high-performance phone and keyword filtering.
 - **Persistence**: SQLite 3 with WAL mode for high concurrency.
 - **Hands-free Deployment**: Automatic systemd service installation and management.
 - **Playwright Powered**: Uses WebKit for a lightweight yet powerful browser automation experience.
