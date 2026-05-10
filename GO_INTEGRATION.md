@@ -54,7 +54,61 @@ func main() {
 }
 ```
 
-## 3. Advanced: Binary Streaming
+## 3. Sidecar Integration (HTTP)
+
+When running Trakand Reach as a sidecar, you can interact with it via its REST API (default port 3000).
+
+### Query Engine Status
+`GET /reach/health`
+Returns the current health and boot state of the engine.
+
+### Start a New Session
+`POST /reach/sessions`
+```json
+{
+  "id": "unique-session-id",
+  "webhook_url": "https://your-backend.com/webhook",
+  "device_info": {
+    "userAgent": "...",
+    "width": 1280,
+    "height": 720
+  }
+}
+```
+
+### Get QR Code
+`GET /reach/sessions/{id}/qr`
+Returns the latest generated QR code for the session (if not already authenticated).
+
+### Send a Message
+`POST /reach/send`
+```json
+{
+  "session_id": "unique-session-id",
+  "to": "1234567890",
+  "text": "Hello from Sidecar!"
+}
+```
+
+## 4. Spam Filtering
+
+Trakand Reach includes a high-performance spam filter. It reads from a `spam.txt` file in the application's working directory.
+
+### `spam.txt` Format
+```text
+# Block messages from specific numbers
+phone: 1234567890
+phone: 0987654321
+
+# Block messages containing specific keywords (case-insensitive)
+word: buy now
+word: click here
+word: spammy-link.com
+```
+
+Filtered messages are discarded and never forwarded to webhooks or emitted as events.
+
+## 5. Advanced: Binary Streaming
 If you want to consume the WebP stream programmatically:
 - The stream consists of binary frames.
 - Each frame starts with the 8-byte header `WREACH\x00\x01\x00\x01`.
