@@ -85,10 +85,12 @@ func (m *Manager) SetWebhookConfig(url, secret string) {
 
 func (m *Manager) Start() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.isStarted {
+		m.mu.Unlock()
 		return nil
 	}
+
+	log.Printf("Starting Trakand Reach Engine...")
 
 	pw, err := playwright.Run()
 	if err != nil {
@@ -96,6 +98,7 @@ func (m *Manager) Start() error {
 	}
 	m.pw = pw
 	m.isStarted = true
+	m.mu.Unlock()
 
 	// Migration from legacy JSON
 	legacyJSON := filepath.Join(m.baseDir, "sessions.json")
@@ -109,7 +112,52 @@ func (m *Manager) Start() error {
 	// Auto-resume sessions
 	go m.resumeSessions()
 
+	// Ensure default session
+	go m.ensureDefaultSession()
+
 	return nil
+}
+
+func (m *Manager) ensureDefaultSession() {
+	// Give it a moment for the engine to stabilize
+	time.Sleep(2 * time.Second)
+
+	sessionID := "default"
+	if _, ok := m.sessions.Load(sessionID); ok {
+		return
+	}
+
+	// Check DB
+	var session *models.Session
+	sessions, err := m.repo.GetSessions()
+	if err == nil {
+		for _, s := range sessions {
+			if s.ID == sessionID {
+				session = s
+				break
+			}
+		}
+	}
+
+	if session == nil {
+		session = &models.Session{
+			ID: sessionID,
+			DeviceInfo: models.DeviceInfo{
+				UserAgent:  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+				Width:      1280,
+				Height:     720,
+				PixelRatio: 1.0,
+			},
+			LastURL: "https://web.whatsapp.com",
+		}
+		m.repo.SaveSession(session)
+	}
+
+	log.Printf("Starting default WhatsApp session...")
+	_, err = m.StartSession(session)
+	if err != nil {
+		log.Printf("Failed to start default session: %v", err)
+	}
 }
 
 func (m *Manager) WarmBrowser(browserType string) {

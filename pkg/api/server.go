@@ -204,9 +204,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Forward Events & Stream Screenshots
-	stop := make(chan bool)
-	go s.streamScreenshots(conn, inst, stop)
+	// Forward Events
+	// stop := make(chan bool)
+	// go s.streamScreenshots(conn, inst, stop)
 
 	for {
 		select {
