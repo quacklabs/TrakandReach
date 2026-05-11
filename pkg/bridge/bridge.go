@@ -122,11 +122,18 @@ const JSBridge = `
         startStateMonitor() {
             setInterval(() => {
                 try {
-                    const qrDiv = document.querySelector('div[data-ref]');
-                    const qr = qrDiv ? qrDiv.getAttribute('data-ref') : null;
+                    const qrDiv = document.querySelector('div[data-ref], canvas[aria-label="Scan me!"]');
+                    let qr = null;
+                    if (qrDiv) {
+                        qr = qrDiv.getAttribute('data-ref');
+                        if (!qr && qrDiv.parentElement) {
+                            qr = qrDiv.parentElement.getAttribute('data-ref');
+                        }
+                    }
 
                     if (qr && qr !== this.lastQR) {
                         this.lastQR = qr;
+                        console.log("Trakand Bridge: New QR captured:", qr);
                         if (window.trakand_emit) window.trakand_emit('qr', qr);
                     }
 
