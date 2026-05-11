@@ -128,9 +128,13 @@ func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 
 	if len(parts) == 5 && string(parts[4]) == "qr" {
 		w.Header().Set("Content-Type", "application/json")
+		qr := ""
+		if status["qr"] != nil {
+			qr = status["qr"].(string)
+		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"session_id": sessionID,
-			"qr":         status["qr"],
+			"qr":         qr,
 		})
 		return
 	}
